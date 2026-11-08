@@ -1,5 +1,6 @@
 import type { LuaForce, LuaGuiElement, LuaPlayer } from 'factorio:runtime'
 import { BASIC_SKILL_DEFINITIONS } from './basic_skill_library'
+import { LEVELED_LIBRARY_DEFINITIONS, LEGACY_KNOWLEDGE_DEFINITIONS } from './leveled_skill_library'
 import { get_controlled_actor, peek_controlled_actor } from './actors/actor_controller'
 import {
   analyze_factory_area,
@@ -23,6 +24,18 @@ export type SkillKind = 'production' | 'logistics' | 'construction' | 'utility' 
 export type SkillStatus = 'observed' | 'candidate' | 'verified' | 'deprecated'
 export type SkillStage = 'example' | 'pattern' | 'executable_candidate' | 'verified_skill'
 export type SkillVerificationState = 'passed' | 'failed' | 'not_tested' | 'unvalidated'
+export type LibraryContentType = 'knowledge' | 'skill'
+export type CuratedLibraryProfile = 'basic' | 'leveled'
+
+export interface LibraryGuidance {
+  when_to_use: string
+  when_to_skip: string
+  live_checks: string[]
+  steps: string[]
+  completion: string[]
+  required_capabilities: string[]
+  related_ids: string[]
+}
 
 export interface SkillFlow {
   item: string
@@ -136,6 +149,11 @@ export interface SkillDefinition {
   // smelting, science. Kept short; omitted when empty so older records keep
   // their canonical JSON.
   goal_tags?: string[]
+  search_aliases?: string[]
+  // Optional so canonical legacy definitions and pinned snapshots stay byte-stable.
+  content_type?: LibraryContentType
+  level?: number
+  guidance?: LibraryGuidance
 }
 
 export interface SkillUiSummary {
@@ -163,6 +181,8 @@ interface SkillExportRecord {
 declare const storage: {
   sgluna_skill_definitions?: Record<string, SkillDefinition>
   sgluna_skill_exports?: Record<string, SkillExportRecord>
+  sgluna_curated_library_profile?: CuratedLibraryProfile
+  sgluna_preserved_curated_variants?: Record<string, boolean>
 }
 
 const MAX_TEXT = 1000
@@ -182,12 +202,30 @@ function plain_object(value: any) {
   return value !== undefined && value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
+// TSTL's StringTrim uses a Lua byte character class containing UTF-8 NBSP/BOM
+// bytes. That can remove a trailing byte from ordinary non-ASCII text. Match
+// complete ECMAScript whitespace strings instead; lengths/slices stay aligned
+// in both JavaScript (code units) and Lua (UTF-8 bytes).
+const SKILL_WHITESPACE = [' ', '\t', '\n', '\r', '\v', '\f', '\u00A0', '\u1680', '\u2000', '\u2001', '\u2002', '\u2003', '\u2004', '\u2005', '\u2006', '\u2007', '\u2008', '\u2009', '\u200A', '\u2028', '\u2029', '\u202F', '\u205F', '\u3000', '\uFEFF']
+export function trim_skill_text(value: string) {
+  let result = value
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const whitespace of SKILL_WHITESPACE) {
+      if (result.startsWith(whitespace)) { result = result.slice(whitespace.length); changed = true }
+      if (result.endsWith(whitespace)) { result = result.slice(0, result.length - whitespace.length); changed = true }
+    }
+  }
+  return result
+}
+
 function clean_text(value: unknown, label: string, max = MAX_TEXT, required = true) {
   if (typeof value !== 'string') {
     if (!required && (value === undefined || value === null)) return ''
     throw new Error(`${label} must be a string`)
   }
-  let result = value.split('\r').join(' ').split('\n').join(' ').split('\t').join(' ').trim()
+  let result = trim_skill_text(value.split('\r').join(' ').split('\n').join(' ').split('\t').join(' '))
   while (result.includes('  ')) result = result.split('  ').join(' ')
   if (required && result.length === 0) throw new Error(`${label} must not be empty`)
   if (result.length > max) throw new Error(`${label} exceeds ${max} characters`)
@@ -447,7 +485,7 @@ export const MAX_GOAL_TAGS = 16
 // underscores become hyphens. Non-ASCII tags (player shorthand such as 煤蛇)
 // are kept as written.
 export function normalize_skill_tag(value: string) {
-  let tag = value.toLowerCase().trim()
+  let tag = trim_skill_text(value.toLowerCase())
   for (const separator of [' ', '_', '\t']) tag = tag.split(separator).join('-')
   while (tag.includes('--')) tag = tag.split('--').join('-')
   if (tag.startsWith('-')) tag = tag.slice(1)
@@ -515,8 +553,36 @@ export function canonicalize_skill_definition(value: any): SkillDefinition {
     },
     examples: canonical_examples(value.examples),
   }
+  const aliases = string_list(value.search_aliases, 'search_aliases', 24)
+  if (aliases.length > 0) skill.search_aliases = aliases
   const goal_tags = canonical_goal_tags(value.goal_tags)
   if (goal_tags.length > 0) skill.goal_tags = goal_tags
+  if (value.content_type !== undefined) skill.content_type = enum_value(value.content_type, ['knowledge', 'skill'] as const, 'content_type', 'skill')
+  if (value.level !== undefined) {
+    skill.level = non_negative_integer(value.level, 'level')
+    if (skill.level > 7) throw new Error('level must be between 0 and 7')
+  }
+  const reference_guidance = skill.content_type === 'knowledge' && plain_object(value.reference) && plain_object(value.applicability)
+    ? { ...value.applicability, steps: value.reference.concepts, completion: value.reference.interpretation_checks, related_ids: value.related_ids }
+    : undefined
+  const supplied_guidance = value.guidance ?? reference_guidance
+  if (supplied_guidance !== undefined) {
+    if (!plain_object(supplied_guidance)) throw new Error('guidance must be an object')
+    const raw = supplied_guidance
+    const steps = string_list(raw.steps, 'guidance.steps')
+    const completion = string_list(raw.completion, 'guidance.completion')
+    if (steps.length === 0 || completion.length === 0) throw new Error('guidance requires steps and completion evidence')
+    skill.guidance = {
+      when_to_use: clean_text(raw.when_to_use, 'guidance.when_to_use'),
+      when_to_skip: clean_text(raw.when_to_skip, 'guidance.when_to_skip'),
+      live_checks: string_list(raw.live_checks, 'guidance.live_checks'),
+      steps,
+      completion,
+      required_capabilities: string_list(raw.required_capabilities, 'guidance.required_capabilities'),
+      related_ids: string_list(raw.related_ids, 'guidance.related_ids').map(assert_safe_skill_id),
+    }
+  }
+  if (skill.content_type === 'knowledge' && skill.status === 'verified') throw new Error('knowledge is not verified by the physical skill verifier')
   assert_verified_evidence(skill)
   return skill
 }
@@ -535,6 +601,7 @@ function ensure_definitions() {
 
 function is_basic_skill_id(id: string) {
   for (const raw of BASIC_SKILL_DEFINITIONS) if (raw.id === id) return true
+  for (const raw of LEVELED_LIBRARY_DEFINITIONS) if (raw.id === id) return true
   return false
 }
 
@@ -566,6 +633,24 @@ function is_unedited_curated_copy(stored: SkillDefinition) {
   return true
 }
 
+function same_curated_value(left: any, right: any): boolean {
+  if (left === right) return true
+  if (typeof left !== 'object' || typeof right !== 'object' || left === null || right === null) return false
+  for (const key in left) if (!same_curated_value(left[key], right[key])) return false
+  for (const key in right) if (left[key] === undefined) return false
+  return true
+}
+
+function is_current_canonical_copy(stored: SkillDefinition) {
+  for (const raw of BASIC_SKILL_DEFINITIONS) {
+    if (raw.id === stored.id && same_curated_value(stored, canonicalize_skill_definition(raw))) return true
+  }
+  for (const raw of [...LEVELED_LIBRARY_DEFINITIONS, ...LEGACY_KNOWLEDGE_DEFINITIONS]) {
+    if (raw.id === stored.id && same_curated_value(stored, canonicalize_skill_definition(raw))) return true
+  }
+  return false
+}
+
 // Curated ids that were removed from BASIC_SKILL_DEFINITIONS. Saves seeded
 // earlier still hold a stored copy; seeding deletes it, but only while it is an
 // unedited curated copy, so a player-edited or learned skill that reuses the id
@@ -576,11 +661,31 @@ function is_unedited_curated_copy(stored: SkillDefinition) {
 // hid that the science-pack recipe itself is locked behind a technology.
 export const RETIRED_BASIC_SKILL_IDS: string[] = ['automation-science-bootstrap']
 
+export function curated_library_profile(): CuratedLibraryProfile {
+  return storage.sgluna_curated_library_profile === 'leveled' ? 'leveled' : 'basic'
+}
+
+// User/RCON selection only; never a model operation. Validate before changing
+// synchronized storage. Personal edits and dynamic learned entries are retained.
+export function select_curated_library(profile: unknown) {
+  if (profile !== 'basic' && profile !== 'leveled') throw new Error('unknown curated library profile')
+  const source = profile === 'leveled' ? LEVELED_LIBRARY_DEFINITIONS : BASIC_SKILL_DEFINITIONS
+  for (const raw of source) canonicalize_skill_definition(raw)
+  storage.sgluna_curated_library_profile = profile
+  return { profile, ...ensure_basic_skill_definitions() }
+}
+
 export function ensure_basic_skill_definitions() {
   const registry = ensure_definitions()
+  const source = curated_library_profile() === 'leveled' ? LEVELED_LIBRARY_DEFINITIONS : BASIC_SKILL_DEFINITIONS
+  const inactive = curated_library_profile() === 'leveled' ? BASIC_SKILL_DEFINITIONS : LEVELED_LIBRARY_DEFINITIONS
   let added = 0
   let upgraded = 0
   let removed = 0
+  const preserve_variant = (id: string) => {
+    if (storage.sgluna_preserved_curated_variants === undefined) storage.sgluna_preserved_curated_variants = {}
+    storage.sgluna_preserved_curated_variants[id] = true
+  }
   for (const id of RETIRED_BASIC_SKILL_IDS) {
     const stored = registry[id]
     if (stored !== undefined && is_unedited_curated_copy(stored)) {
@@ -588,19 +693,39 @@ export function ensure_basic_skill_definitions() {
       removed++
     }
   }
-  for (const raw of BASIC_SKILL_DEFINITIONS) {
+  for (const raw of inactive) {
+    // Shared canonical ids are incorporated foundations, not inactive content.
+    if (source.some(entry => entry.id === raw.id)) continue
+    const stored = registry[raw.id]
+    if (storage.sgluna_preserved_curated_variants?.[raw.id]) continue
+    if (stored !== undefined && is_unedited_curated_copy(stored) && !is_current_canonical_copy(stored)) {
+      preserve_variant(raw.id)
+      continue
+    }
+    if (stored !== undefined && is_unedited_curated_copy(stored)) { delete registry[raw.id]; removed++ }
+  }
+  for (const raw of source) {
     const skill = canonicalize_skill_definition(raw)
     const stored = registry[skill.id]
+    if (storage.sgluna_preserved_curated_variants?.[skill.id]) continue
     if (stored === undefined) {
       registry[skill.id] = skill
       added++
     }
-    else if (stored.revision < skill.revision && is_unedited_curated_copy(stored)) {
-      registry[skill.id] = skill
-      upgraded++
+    else if (is_unedited_curated_copy(stored)) {
+      const same_family = stored.source.evidence_refs.join('\n') === skill.source.evidence_refs.join('\n')
+      if ((!same_family || skill.content_type === 'knowledge') && !is_current_canonical_copy(stored)) {
+        // Unknown historical copies may be imports without an edit marker.
+        // Retain their bytes and durable protection across switch-back/reload.
+        preserve_variant(skill.id)
+      }
+      else if (stored.revision < skill.revision || !same_family) {
+        registry[skill.id] = skill
+        upgraded++
+      }
     }
   }
-  return { added, upgraded, removed, total: BASIC_SKILL_DEFINITIONS.length }
+  return { added, upgraded, removed, total: source.length }
 }
 
 function skill_search_text(skill: SkillDefinition) {
@@ -621,6 +746,8 @@ function skill_search_text(skill: SkillDefinition) {
     ...skill.known_failure_modes,
     ...skill.examples.map(value => `${value.summary} ${value.notes ?? ''}`),
     ...(skill.goal_tags ?? []),
+    ...(skill.guidance?.live_checks ?? []),
+    ...(skill.guidance?.steps ?? []),
   ]
   return values.join(' ').toLowerCase()
 }
@@ -681,6 +808,9 @@ export function derive_skill_tags(skill: SkillDefinition): SkillTag[] {
     result.push({ tag, source })
   }
   for (const tag of skill.goal_tags ?? []) add(tag, 'goal')
+  // Alias phrases and queries use the same stopword/singular normalization.
+  // Keep ordinary authored tags unchanged for existing procedural rankings.
+  for (const alias of skill.search_aliases ?? []) add(goal_search_terms(alias).words.join('-'), 'goal')
   for (const flow of skill.outputs) add(flow.item, 'output')
   for (const node of skill.topology.nodes) {
     add(node.entity_name, 'entity')
@@ -707,7 +837,7 @@ export function goal_search_terms(text: string): GoalTerms {
   let normalized = text.toLowerCase()
   for (const separator of GOAL_SEPARATORS) normalized = normalized.split(separator).join(' ')
   while (normalized.includes('  ')) normalized = normalized.split('  ').join(' ')
-  normalized = normalized.trim()
+  normalized = trim_skill_text(normalized)
   const terms: string[] = []
   const add = (term: string) => {
     if (term.length >= 2 && !terms.includes(term)) terms.push(term)
@@ -889,6 +1019,7 @@ export function rank_skills_for_goal(goal_text: string, world?: SkillWorldView, 
   const goal = goal_search_terms(goal_text)
   const ranked: SkillGoalMatch[] = []
   for (const skill of list_skill_definitions()) {
+    if (skill.content_type === 'knowledge') continue
     if (!include_deprecated && skill.status === 'deprecated') continue
     const match = score_skill_for_goal(skill, goal, world)
     if (match.tag_hits > 0 || match.relevance >= MIN_TEXT_ONLY_RELEVANCE) ranked.push(match)
@@ -932,6 +1063,8 @@ export interface SkillCard {
   needs: SkillCardNeed[]
   matched: string[]
   score: number
+  content_type?: LibraryContentType
+  level?: number
 }
 
 // The needs shown on a card or search result, at most CARD_LIST_MAX. When there
@@ -953,6 +1086,8 @@ function visible_needs(needs: SkillCardNeed[]): SkillCardNeed[] {
 
 export function skill_card(match: SkillGoalMatch): SkillCard {
   return {
+    ...(match.skill.content_type !== undefined ? { content_type: match.skill.content_type } : {}),
+    ...(match.skill.level !== undefined ? { level: match.skill.level } : {}),
     id: match.skill.id,
     name: match.skill.name,
     status: match.skill.status,
@@ -981,6 +1116,8 @@ export function find_skill_definitions(query: unknown, limit: unknown = 3, world
   const bounded_limit = positive_integer(limit, 'skill search limit')
   if (bounded_limit > MAX_SKILL_CARDS) throw new Error(`skill search limit must be at most ${MAX_SKILL_CARDS}`)
   return rank_skills_for_goal(normalized, world, true).slice(0, bounded_limit).map(match => ({
+    ...(match.skill.content_type !== undefined ? { content_type: match.skill.content_type } : {}),
+    ...(match.skill.level !== undefined ? { level: match.skill.level } : {}),
     score: match.score,
     id: match.skill.id,
     name: match.skill.name,
@@ -993,6 +1130,54 @@ export function find_skill_definitions(query: unknown, limit: unknown = 3, world
     matched: match.matched.slice(0, CARD_LIST_MAX),
     needs: visible_needs(match.needs),
     warnings: skill_ui_summary(match.skill).warnings,
+  }))
+}
+
+// A reference is deliberately not a SkillDefinition: it has no executable
+// topology, verification, acceptance contract or skill lifecycle authority.
+export function knowledge_reference(entry: SkillDefinition) {
+  if (entry.content_type !== 'knowledge') return undefined
+  return {
+    schema_version: 1, content_type: 'knowledge', id: entry.id, revision: entry.revision,
+    name: entry.name, summary: entry.summary,
+    ...(entry.search_aliases ? { search_aliases: entry.search_aliases } : {}),
+    ...(entry.level !== undefined ? { level: entry.level } : {}),
+    ...(entry.guidance !== undefined ? {
+      applicability: { when_to_use: entry.guidance.when_to_use, when_to_skip: entry.guidance.when_to_skip,
+        live_checks: entry.guidance.live_checks, required_capabilities: entry.guidance.required_capabilities },
+      reference: { concepts: entry.guidance.steps, interpretation_checks: entry.guidance.completion },
+      related_ids: entry.guidance.related_ids,
+    } : {}),
+    known_failure_modes: entry.known_failure_modes,
+    source: entry.source,
+  }
+}
+
+export function get_knowledge_reference(id: string) {
+  const entry = get_skill_definition(id)
+  return entry === undefined ? undefined : knowledge_reference(entry)
+}
+
+export function get_procedural_skill(id: string) {
+  const entry = get_skill_definition(id)
+  return entry?.content_type === 'knowledge' ? undefined : entry
+}
+
+export function find_knowledge_references(query: unknown, limit: unknown = 3) {
+  const normalized = utf8_safe_prefix(clean_text(query, 'knowledge search query', MAX_RAW_QUERY_CHARS), MAX_FIND_QUERY_BYTES)
+  const bounded_limit = positive_integer(limit, 'knowledge search limit')
+  if (bounded_limit > MAX_SKILL_CARDS) throw new Error(`knowledge search limit must be at most ${MAX_SKILL_CARDS}`)
+  const terms = goal_search_terms(normalized)
+  const matches: SkillGoalMatch[] = []
+  for (const entry of list_skill_definitions()) {
+    if (entry.content_type !== 'knowledge' || entry.status === 'deprecated') continue
+    const match = score_skill_for_goal(entry, terms)
+    if (match.tag_hits > 0 || match.relevance >= MIN_TEXT_ONLY_RELEVANCE) matches.push(match)
+  }
+  matches.sort((left, right) => right.score - left.score || (left.skill.id < right.skill.id ? -1 : 1))
+  return matches.slice(0, bounded_limit).map(({ skill }) => ({
+    content_type: 'knowledge', id: skill.id, revision: skill.revision, name: skill.name,
+    summary: one_line_summary(skill.summary), ...(skill.level !== undefined ? { level: skill.level } : {}),
   }))
 }
 
@@ -1108,6 +1293,9 @@ export function put_skill_definition(value: any) {
 export function put_untrusted_skill_definition(value: any) {
   const skill = canonicalize_skill_definition(value)
   if (skill.status === 'verified') throw new Error('verified skill promotion requires the live runtime verifier; caller-supplied verified definitions are not trusted')
+  // An external import is a caller-owned definition even if copied from a
+  // curated export. Curated evidence alone does not grant overwrite authority.
+  if (is_unedited_curated_copy(skill)) skill.source.evidence_refs.push('imported:caller-definition')
   return store_dynamic_skill_definition(skill)
 }
 
@@ -1207,6 +1395,19 @@ function constraint_text(constraint: SkillConstraint) {
 }
 
 export function generate_skill_markdown(skill: SkillDefinition) {
+  if (skill.content_type === 'knowledge') {
+    const lines = [`# ${md_inline(skill.name)}`, '', 'Content type: knowledge', '', skill.summary,
+      '', 'Reference only: retrieve on demand. No execution, physical verification or current-world authority.']
+    if (skill.level !== undefined) lines.push(`Complexity level: L${skill.level}`)
+    if (skill.guidance !== undefined) {
+      lines.push('', '## Applicability', '', skill.guidance.when_to_use, '', skill.guidance.when_to_skip)
+      for (const [title, values] of [['Live checks', skill.guidance.live_checks], ['Concepts and methods', skill.guidance.steps], ['Related entries', skill.guidance.related_ids]] as Array<[string, string[]]>) {
+        lines.push('', `## ${title}`, ''); md_list(lines, values, 'None recorded.')
+      }
+    }
+    lines.push('', '## Provenance', '', ...skill.source.evidence_refs, '')
+    return lines.join('\n')
+  }
   const lines: string[] = []
   lines.push(`# ${md_inline(skill.name)}`, '')
   lines.push('## Purpose', '', skill.summary, '')
@@ -1216,6 +1417,16 @@ export function generate_skill_markdown(skill: SkillDefinition) {
   lines.push(`- Lifecycle status: ${skill.status}`)
   lines.push(`- Artifact stage: ${skill.stage}`)
   lines.push(`- Kind: ${skill.kind}`, '')
+  if (skill.content_type !== undefined) lines.push(`- Content type: ${skill.content_type}`)
+  if (skill.level !== undefined) lines.push(`- Complexity level: L${skill.level} (not verification or availability)`)
+  if (skill.guidance !== undefined) {
+    lines.push('', '## Use this entry', '', skill.guidance.when_to_use, '', '## Skip this entry', '', skill.guidance.when_to_skip)
+    for (const [heading, values] of [
+      ['Live checks', skill.guidance.live_checks], ['Steps', skill.guidance.steps],
+      ['Completion evidence', skill.guidance.completion], ['Required capabilities', skill.guidance.required_capabilities],
+      ['Related entries', skill.guidance.related_ids],
+    ] as Array<[string, string[]]>) { lines.push('', `## ${heading}`, ''); md_list(lines, values, 'None recorded.') }
+  }
 
   lines.push('## Preconditions', '')
   md_list(lines, skill.preconditions.map(condition => `${condition.kind}: ${condition.subject} — ${condition.description}${condition.minimum !== undefined ? ` (minimum ${condition.minimum})` : ''}`), 'None recorded.')
@@ -1265,8 +1476,8 @@ export function serialize_skill_json(skill: SkillDefinition) {
   return `${helpers.table_to_json(skill)}\n`
 }
 
-export function skill_export_relative_directory(skill: Pick<SkillDefinition, 'id' | 'revision'>) {
-  return `sgluna-skills/${assert_safe_skill_id(skill.id)}/r${positive_integer(skill.revision, 'revision')}`
+export function skill_export_relative_directory(skill: Pick<SkillDefinition, 'id' | 'revision' | 'content_type'>) {
+  return `${skill.content_type === 'knowledge' ? 'sgluna-knowledge' : 'sgluna-skills'}/${assert_safe_skill_id(skill.id)}/r${positive_integer(skill.revision, 'revision')}`
 }
 
 export interface SkillExportResult {
@@ -1279,18 +1490,20 @@ export interface SkillExportResult {
 export function export_skill(id: string): SkillExportResult {
   const skill = get_skill_definition(id)
   if (skill === undefined) throw new Error(`unknown skill: ${id}`)
-  const canonical_json = serialize_skill_json(skill)
+  const reference = knowledge_reference(skill)
+  if (skill.content_type === 'knowledge' && reference === undefined) throw new Error(`invalid knowledge reference: ${id}`)
+  const canonical_json = reference !== undefined ? `${helpers.table_to_json(reference)}\n` : serialize_skill_json(skill)
   const directory = skill_export_relative_directory(skill)
   const relative_path = `script-output/${directory}`
-  const key = `${skill.id}@${skill.revision}`
+  const key = `${skill.content_type === 'knowledge' ? 'knowledge:' : ''}${skill.id}@${skill.revision}`
   const previous = exports_state()[key]
   if (previous !== undefined) {
     if (previous.canonical_json !== canonical_json) throw new Error(`skill ${skill.id} revision ${skill.revision} was already exported with different content; increment revision before exporting again`)
     return { id: skill.id, revision: skill.revision, duplicate: true, relative_path: previous.relative_path }
   }
 
-  helpers.write_file(`${directory}/skill.json`, canonical_json, false)
-  helpers.write_file(`${directory}/SKILL.md`, generate_skill_markdown(skill), false)
+  helpers.write_file(`${directory}/${skill.content_type === 'knowledge' ? 'knowledge' : 'skill'}.json`, canonical_json, false)
+  helpers.write_file(`${directory}/${skill.content_type === 'knowledge' ? 'KNOWLEDGE' : 'SKILL'}.md`, generate_skill_markdown(skill), false)
   exports_state()[key] = {
     schema_version: SKILL_SCHEMA_VERSION,
     id: skill.id,
@@ -1315,6 +1528,20 @@ export function create_skill_candidate_from_factory_block(analysis_id: string, b
 }
 
 export function create_skill_remote_interface() {
+  remote.add_interface('autorio_references', {
+    find: (query: unknown, limit: unknown = 3) => {
+      try { return { ok: true, results: find_knowledge_references(query, limit) } }
+      catch (error) { return { ok: false, error: error_message(error), results: [] } }
+    },
+    get: (id: string) => {
+      try {
+        const reference = get_knowledge_reference(id)
+        if (reference !== undefined && helpers.table_to_json(reference).length > 7000) return { ok: false, error: 'knowledge_reference_too_large' }
+        return reference
+      }
+      catch { return { ok: false, error: 'invalid_knowledge_reference' } }
+    },
+  })
   remote.add_interface('autorio_skills', {
     put_definition: (value: unknown) => {
       try {
@@ -1335,7 +1562,7 @@ export function create_skill_remote_interface() {
       }
     },
     get: (id: string) => {
-      try { return get_skill_definition(id) }
+      try { return get_procedural_skill(id) }
       catch { return undefined }
     },
     find: (query: unknown, limit: unknown = 3) => {
@@ -1348,7 +1575,12 @@ export function create_skill_remote_interface() {
       try { return offer_skill_cards(request) }
       catch (error) { return { ok: false, error: error_message(error), cards: [] } }
     },
-    list: () => list_skill_definitions(),
+    list: () => list_skill_definitions().filter(entry => entry.content_type !== 'knowledge'),
+    curated_profile: () => curated_library_profile(),
+    select_curated_library: (profile: unknown) => {
+      try { return { ok: true, ...select_curated_library(profile) } }
+      catch (error) { return { ok: false, error: error_message(error) } }
+    },
     analyze_area: (request: unknown = {}) => {
       const actor = get_controlled_actor()
       if (!actor || !actor.is_valid) return { ok: false, error: 'controlled actor is unavailable' }
@@ -1477,7 +1709,7 @@ export function render_skill_export_section(parent: LuaGuiElement) {
       name: `${SKILL_EXPORT_BUTTON_PREFIX}${skill.id}`,
       caption: 'EXPORT SKILL',
       style: 'confirm_button',
-      tooltip: 'Export the structured skill.json and generated SKILL.md companion into the managed script-output/sgluna-skills directory.',
+      tooltip: 'Export a procedure as skill.json/SKILL.md under sgluna-skills, or a knowledge reference as knowledge.json/KNOWLEDGE.md under sgluna-knowledge, in script-output.',
     })
     export_button.style.minimal_width = 130
     scroll.add({ type: 'label', caption: `Source: ${skill.source} · Stage: ${skill.stage} · Inputs: ${skill.inputs.join(', ') || 'none'} · Outputs: ${skill.outputs.join(', ') || 'none'}` })

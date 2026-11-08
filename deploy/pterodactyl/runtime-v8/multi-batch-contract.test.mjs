@@ -5,6 +5,9 @@ import { CanonicalTaskBoardMemory } from './canonical-task-board-memory.mjs'
 import { NpcAgentLoop } from './npc-agent-loop.mjs'
 import { activeStepVerifiedOperationNames, applyPlanningEvent, getActivePlan, PLANNING_EVENT, restorePlanningState, serializePlanningState } from './planning-state.mjs'
 import { FakeFactorio, gather, planReply, recordingJev } from './task-loop-fixtures.mjs'
+import { installHistoricalFactorySupplement } from './bg-stock-fixtures.mjs'
+import { createFactoryRegistry, registerFactoryCell } from './factory-registry.mjs'
+import { reconcileFactoryCellUse } from './factory-cell-use.mjs'
 
 const fixture = JSON.parse(await fs.readFile(new URL('./fixtures/run-al-multi-batch-contract.json', import.meta.url), 'utf8'))
 const KEY = 'npc:sgluna'
@@ -18,6 +21,7 @@ const collect = { name: 'move_items_exact', args: { unit_number: 38, item_name: 
 // boundary. Fake native receipts go through admission and reconciliation.
 function world({ resend = true } = {}) {
   const game = new FakeFactorio({ inventory: { 'iron-plate': 8 } })
+  game.status.connected_players = 0
   game.knownTechnologies.add('steam-power')
   game.nearby.actor_position = { x: -74.4453125, y: -70.328125 }
   game.nearby.entities = [
@@ -30,6 +34,34 @@ function world({ resend = true } = {}) {
     if (text.includes("'move_items_exact'")) game.lastBasicResult = { ...proof, moved_count: 50, to_entity: false }
   }
   const memory = new CanonicalTaskBoardMemory()
+  // Explicit synthetic direct-feed iron job supplements the historical AL
+  // payload. This fixture setup is not an inferred assignment or engine proof.
+  const seed = new CanonicalTaskBoardMemory()
+  installHistoricalFactorySupplement(seed, game, game.nearby.entities[0], { products: ['iron-ore'], ingredients: [] })
+  installHistoricalFactorySupplement(seed, game, game.nearby.entities[1], { products: ['iron-plate'], ingredients: ['iron-ore'] })
+  const registry = registerFactoryCell(createFactoryRegistry(game.factoryWorldId), { surface_index: 1, force_index: 1,
+    assignment: { products: ['iron-plate'], purpose: 'Synthetic AL iron bootstrap', method: 'synthetic_direct_feed_fixture' },
+    members: seed.getFactoryRegistry().cells.flatMap(cell => cell.members),
+    ports: [{ port_id: 'iron-output', direction: 'output', kind: 'item', resource: 'iron-plate' }], origin: { source: 'synthetic_fixture' } })
+  memory.restore({ ...seed.snapshot(), factory_registry: registry })
+  const drill = game.factoryMembers.get(37)
+  drill.recipe = { state: 'not_applicable', ingredients: [], products: [], truncated: false }
+  drill.source_resources = { state: 'known', truncated: false, resources: [{ name: 'iron-ore', amount: 100,
+    products: [{ type: 'item', name: 'iron-ore', amount: 1 }], products_truncated: false }] }
+  drill.endpoint_facts.item_drop = { state: 'known', routes: [{ state: 'connected', target: game.factoryMembers.get(38).locator }] }
+  drill.item_routes = { state: 'known', truncated: false, routes: [{ kind: 'drop', state: 'connected', target: game.factoryMembers.get(38).locator }] }
+  let syntheticInput = 0
+  const native = game.command.bind(game)
+  game.command = async text => {
+    if (/remote\.call\(["']sgluna_factory["'],["']observe["']/.test(text)) {
+      const furnace = game.factoryMembers.get(38)
+      furnace.inventories = [{ state: 'known', truncated: false, index: 2, role: 'input',
+        items: syntheticInput ? [{ name: 'iron-ore', quality: 'normal', count: syntheticInput }] : [] }]
+      furnace.incoming_item_facts = { schema_version: 1, tick: game.gameTick, state: 'known', coverage: 'complete', truncated: false,
+        unresolved: false, producers: [{ relation: 'mining_drop', state: 'connected', producer: drill.locator }] }
+    }
+    return native(text)
+  }
   const events = []
   let calls = 0
   let contractCalls = 0
@@ -63,6 +95,9 @@ function world({ resend = true } = {}) {
   })
   agent.behaviorTrace = { emit: async row => events.push(row) }
   return { game, memory, agent, events, step, calls: () => calls, contractCalls: () => contractCalls,
+    // Declared synthetic movement between fresh native-shaped frames. It is
+    // neither a completion label nor evidence from the historical AL engine.
+    deliverSyntheticOre() { drill.source_resources.resources[0].amount--; syntheticInput++; game.gameTick++ },
     committedSteps: () => goalBaseline,
     async fuel() {
       await agent.request(fixture.goal.summary, { sender: 'Louis' })
@@ -104,8 +139,11 @@ for (const resend of [true, false]) {
     w.agent.memory = restored
     assert.deepEqual(activeStepVerifiedOperationNames(restored.planningState(KEY)), ['supply_entity'])
     const receipt = await w.agent.taskStatusReceipt()
+    const baseline = await reconcileFactoryCellUse(w.agent, { phase: 'activation' })
+    assert.equal(baseline.delivery.observation.code, 'direct_delivery_window_started')
+    w.deliverSyntheticOre()
     const result = await w.agent.routeStepCompletionDecision(receipt)
-    assert.equal(result.verified, true, 'both receipt types plus fresh stock/research satisfy the whole step')
+    assert.equal(result.verified, true, `both receipt types, fresh stock/research and the new synthetic delivery window satisfy the step: ${result.reason}`)
     assert.equal(restored.currentPlan(KEY).task_board.completed_count, 2)
     assert.deepEqual(getActivePlan(restored.planningState(KEY)).steps, w.committedSteps(), 'contracts and guidance remain immutable')
     const proofs = w.events.filter(r => r.event==='step.receipt_progress_checked')

@@ -21,6 +21,7 @@ import { MODEL_RECOVERABLE_RESUME_DELAY_MS } from './pause-class.mjs'
 import { productionEstimateAnswer } from './steam-run-fixtures.mjs'
 import { Session } from './supervisor.mjs'
 import { answersStepContract, deployment, FakeFactorio, gather, inventoryCheckpoint, planReply, recordingJev } from './task-loop-fixtures.mjs'
+import { installHistoricalFactorySupplement } from './bg-stock-fixtures.mjs'
 
 export const KEY = 'npc:sgluna'
 export const FURNACE_UNIT = 26
@@ -128,7 +129,7 @@ function parsePreflight(text) {
 }
 
 export class FurnaceFactorio extends FakeFactorio {
-  constructor({ inventory = {}, furnace = {}, connectedPlayers = 0 } = {}) {
+  constructor({ inventory = {}, furnace = {}, connectedPlayers = 0, factoryJob = 'copper-plate' } = {}) {
     super({ inventory })
     this.status = deployment({ connected_players: connectedPlayers, actor_id: ACTOR_ID, epoch: EPOCH })
     this.furnace = {
@@ -141,6 +142,9 @@ export class FurnaceFactorio extends FakeFactorio {
       energy_kj: 0,
       ...furnace,
     }
+    // The base recovery scenario is a dedicated copper job. Alternate jobs must
+    // be declared by their fixture; incoming model operations never select it.
+    this.factoryJob = factoryJob
     this.preflight = text => this.furnacePreflight(text)
     this.pendingBatch = null
     this.completedBatches = []
@@ -154,6 +158,45 @@ export class FurnaceFactorio extends FakeFactorio {
     this.receipts = []
     this.readCommands = []
     this.preflights = [] // every preflight the harness asked, with the world answer
+  }
+
+  installFactoryFixture(memory) {
+    if (this.factoryJob === null) return
+    const ingredient = Object.keys(SMELTS_TO).find(name => SMELTS_TO[name] === this.factoryJob)
+    assert.ok(ingredient, 'declare one supported synthetic furnace job')
+    const native = this.factoryMembers.get(this.furnace.unit_number)
+    if (memory.factoryRegistryStatus().status === 'uninitialized') {
+      installHistoricalFactorySupplement(memory, this, { ...this.furnace, type: 'furnace' }, {
+        products: [this.factoryJob], ingredients: [ingredient],
+      })
+    }
+    if (this.factoryFixtureInstalled) {
+      // A new host memory on process restart must not replace this still-live
+      // fake engine's recipe/fault state with the generic historical adapter.
+      if (native) this.factoryMembers.set(this.furnace.unit_number, native)
+      else this.factoryMembers.delete(this.furnace.unit_number)
+      return
+    }
+    this.factoryFixtureInstalled = true
+    // A fresh fake engine after a host snapshot restore still supplies its own
+    // native facts. It does not import live authority from the host registry.
+    this.factoryMembers.set(this.furnace.unit_number, {
+      locator: this.targetFacts(), state: 'observed', type: 'furnace',
+      endpoint_facts: { schema_version: 1, inventories: { state: 'known', truncated: false, endpoints: [
+        { state: 'known', inventory_index: SLOT.output, roles: { state: 'known', values: ['output'] } },
+      ] }, recipe_selection: { quality: { state: 'known', name: 'normal' } } },
+    })
+    // Explicit synthetic current recipe evidence follows the fixture's initial
+    // contents, which may conflict with the declared assignment. Preserve that
+    // conflict rather than silently adopting whatever the executor requested.
+    const source = Object.keys(withoutZeros(this.furnace.source))[0]
+    const product = source ? SMELTS_TO[source] : Object.keys(withoutZeros(this.furnace.output))[0] ?? this.factoryJob
+    const row = this.factoryMembers.get(this.furnace.unit_number)
+    row.recipe = { state: 'known', truncated: false, name: product,
+      ingredients: [{ type: 'item', name: Object.keys(SMELTS_TO).find(name => SMELTS_TO[name] === product) }],
+      products: [{ type: 'item', name: product }] }
+    row.burner_fuel_requirement = { state: 'known', required: true, fuel_categories: ['chemical'], truncated: false }
+    row.fuel_item_facts = { state: 'known', truncated: false, items: structuredClone(BURNER_FUELS.items) }
   }
 
   // --- the furnace -----------------------------------------------------------------------------------------------------------
@@ -279,6 +322,17 @@ export class FurnaceFactorio extends FakeFactorio {
   // --- admission and completion -------------------------------------------------------------------------------------------------
 
   async command(text) {
+    if (text.includes("'sgluna_factory','observe'")) {
+      // Refresh only simulated physical quantities. Never recreate a removed
+      // member or overwrite a deliberately corrupted capability/fault payload.
+      const row = this.factoryMembers.get(this.furnace.unit_number)
+      if (row) {
+        row.inventories = ['fuel', 'source', 'output'].map(slot => ({ state: 'known', truncated: false,
+          index: SLOT[slot], role: slot === 'source' ? 'input' : slot,
+          items: Object.entries(withoutZeros(this.furnace[slot])).map(([name, count]) => ({ name, count })) }))
+        row.progress_facts = { crafting_progress: { state: 'known', value: 0 } }
+      }
+    }
     if (text.includes('projection="next_slice_ownership_v1"')) return super.command(text)
     if (text.includes('remote.call("autorio_operations","status")')) {
       const pending = this.pendingBatch
@@ -483,6 +537,7 @@ export class ScriptedModel {
 // --- the agent, the session ----------------------------------------------------------------------------------------------------
 
 export function recoveryWorld({ game, model, stateFile = null, memory = new CanonicalTaskBoardMemory(), agentRoleConfig, roleProvider, decisionScript, completionProtocolVersion = 2 } = {}) {
+  game?.installFactoryFixture?.(memory)
   const trace = []
   let lastTraceAt = 0
   const agentLogs = []
@@ -520,6 +575,7 @@ export function recoveryWorld({ game, model, stateFile = null, memory = new Cano
 // UI-control entry points. Only the I/O edges are stubbed (chat goes to an array, the Task Board UI is a no-op).
 export function recoverySession(world, { actorId = ACTOR_ID, epoch = EPOCH, sessionId = world.game.status?.session } = {}) {
   const { agent } = world
+  world.game.installFactoryFixture?.(agent.memory)
   const chat = []
   const logs = []
   const session = Object.create(Session.prototype)
@@ -575,9 +631,10 @@ export async function settle(session) {
   throw new Error('the session event queue never settled')
 }
 
-// --- the run G -> H -> I scenario ------------------------------------------------------------------------------------------------
+// --- historical Run G input and the synthetic single-job recovery counterpart ----------------------------------------------------
 //
-// One finite goal, one long step: hold 10 copper plates. The world is a stone furnace (unit 26) and an actor with coal, copper ore
+// Original sequence (retained mixedOreBatch now hits the earlier factory guard):
+// one finite goal, one long step: hold 10 copper plates. The world is a stone furnace (unit 26) and an actor with coal, copper ore
 // and some iron ore it does not need.
 //   batch 1  the planner loads the furnace: 5 coal and all 12 copper ore.
 //   (time)   nine plates are smelted; the executor collects the nine that are ready (batch 2).
@@ -586,6 +643,8 @@ export async function settle(session) {
 //            copper ore into the furnace's one source slot. The game refuses that preflight, twice (one correction turn).
 //   run H    the automatic resume restages a fresh executor, which answers with a checkpoint and no operation, then claims BLOCKED.
 //   run I    the next automatic resume restages the executor onto the same world, now with the furnace output in its packet.
+// reachRunG below separately drives this scheduling chain with a compatible
+// copper assignment and conflicting fuels, not a repair of the historical job.
 
 export const STEP = 'Smelt copper ore in the furnace and collect 10 copper plates'
 export const OBJECTIVE = 'smelt ten copper plates in the furnace'
@@ -597,16 +656,20 @@ export const observation = () => ({ content: null, tool_calls: [{ id: 'call_obs'
 export const supply = items => ({ name: 'supply_entity', args: { unit_number: FURNACE_UNIT, items } })
 export const collect = count => ({ name: 'move_items_exact', args: { item_name: 'copper-plate', unit_number: FURNACE_UNIT, max_count: count, to_entity: false } })
 export const executorPlan = (operations, extra = {}) => planReply({ plan: [STEP], currentStep: 0, operations, ...extra })
-export const plannerDraft = () => planReply({
+export const plannerDraft = ({ fuel = 5 } = {}) => planReply({
   plan: [STEP],
   currentStep: 0,
-  operations: [supply([{ item_name: 'coal', count: 5 }, { item_name: 'copper-ore', count: 12 }])],
+  operations: [supply([{ item_name: 'coal', count: fuel }, { item_name: 'copper-ore', count: 12 }])],
   checkpoint: PLATES,
   goal: GOAL,
   stepCompletions: [det(PLATES)],
 })
 // Run G's batch: mine more copper ore, then load iron ore and copper ore into the furnace's one source slot.
 export const mixedOreBatch = () => [gather('copper-ore', 10), supply([{ item_name: 'coal', count: 5 }, { item_name: 'iron-ore', count: 20 }, { item_name: 'copper-ore', count: 10 }])]
+// Separate synthetic single-job counterpart: two native-declared fuels compete
+// for one fuel slot. This retains the single-slot preflight recovery boundary
+// without asking a dedicated copper cell to accept a different assigned job.
+export const conflictingFuelBatch = () => [gather('copper-ore', 10), supply([{ item_name: 'coal', count: 5 }, { item_name: 'wood', count: 1 }, { item_name: 'copper-ore', count: 10 }])]
 export const BLOCKED_REPLY = () => planReply({ chatMessage: 'BLOCKED: no copper ore is within reach and the furnace cannot take another ore', plan: [STEP], currentStep: 0, operations: [] })
 
 export const newCopperGame = options => new FurnaceFactorio({ inventory: { coal: 10, 'copper-ore': 12, 'iron-ore': 20 }, ...options })
@@ -638,19 +701,24 @@ export async function fireResumeTimer(ctx) {
   await settle(ctx.session)
 }
 
-// Starts the goal and drives it to run G's second refusal: a model_recoverable pause with a resume timer pending.
+// Starts the synthetic single-job Run G counterpart and reaches its second
+// single-slot refusal: a model_recoverable pause with a resume timer pending.
+// The original mixedOreBatch is separately tested as an earlier factory guard.
 // Everything goes through the production entry points: a player request, the mod's completion line, the agent's goal.paused
 // activity, the session's event queue and its (mocked) timer.
-export async function reachRunG(t, { stateFile = null, game = newCopperGame(), model = new ScriptedModel() } = {}) {
+export async function reachRunG(t, { stateFile = null,
+  game = newCopperGame({ inventory: { coal: 6, 'copper-ore': 12, 'iron-ore': 20 } }), model = new ScriptedModel() } = {}) {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   model
     .push('planner', 'planner:observe', observation())
-    .push('planner', 'planner:load-furnace', plannerDraft())
+    // One fuel item is consumed by the scripted smelts, leaving an actually
+    // empty fuel slot for the later two-fuel conflict (five remain held).
+    .push('planner', 'planner:load-furnace', plannerDraft({ fuel: 1 }))
     .push('executor', 'executor:observe', observation())
     .push('executor', 'executor:collect-ready-plates', executorPlan([collect(9)]))
     .push('executor', 'executor:observe-again', observation())
-    .push('executor', 'executor:mixed-ore-batch', executorPlan(mixedOreBatch()))
-    .push('executor', 'executor:mixed-ore-batch-again', executorPlan(mixedOreBatch()))
+    .push('executor', 'executor:synthetic-fuel-conflict', executorPlan(conflictingFuelBatch()))
+    .push('executor', 'executor:synthetic-fuel-conflict-again', executorPlan(conflictingFuelBatch()))
   const world = recoveryWorld({ game, model, stateFile })
   const { session, chat, logs } = recoverySession(world)
   const ctx = { t, game, model, world, session, chat, logs, stateFile }

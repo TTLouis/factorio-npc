@@ -1,3 +1,8 @@
+import { isNotebookTool, isValidatedNotebookBatch, handleNotebookToolBatch } from './agent-notebook.mjs'
+import { isKnowledgeTool, isValidatedKnowledgeBatch, handleKnowledgeToolBatch, sanitizeLibraryToolOutput, withoutKnowledgeExchange } from './knowledge-retrieval.mjs'
+import { readCanonicalLibraryTool } from './canonical-library-tools.mjs'
+import { handleMachineDeliveryBinding, isValidatedMachineDeliveryBatch } from './machine-delivery.mjs'
+import { sanitizeOwnerGoal, ownerGoalRecordMatches, sameOwnerGoalConditions } from './owner-goal-intake.mjs'
 import { explicitResumeIdentity, resumeExplicitContinuation, settleExplicitResumeFailure } from './explicit-resume.mjs'
 import { completedSliceAnchor } from './next-slice-state.mjs'
 import { nextSliceOwner, ownsNextSlice, nextSliceNativeState, registerNextSlice, settleNextSliceExit } from './next-slice-liveness.mjs'
@@ -11,15 +16,23 @@ import { setTimeout as observationDelay } from 'node:timers/promises'
 import { OBSERVATION_RATE, observationRateClaim } from './observation-rate.mjs'
 import { normalizeProductionIntent } from './production-task.mjs'
 import { correctMiningLocation, recoverGatherFailure } from './gather-recovery.mjs'
+import { activeStockDependencyBarrier, bindStockDependencyAdmission, continueStockDependencyBarrier, startStockDependencyBarrier } from './bg-stock-dependency.mjs'
 import { continueEntityRefresh, recoverInterruptedEntityRefresh, refreshExactEntity, settleEntityRefreshClaims, REFRESHED_ENTITY_PLAN } from './entity-refresh.mjs'
-import { continueProductionTask, prepareProductionTask, pruneClosedProductionRecords, recoverProductionFailure, screenProductionTask, startProductionTask } from './production-task-runtime.mjs'
+import { continueProductionTask, normalizeManualBootstrapProduction, prepareProductionTask, pruneClosedProductionRecords, recoverProductionFailure, screenProductionTask, startProductionTask } from './production-task-runtime.mjs'
 import { directFeedBootstrapRefusal } from './direct-feed-bootstrap-runtime.mjs'
+import { isFactoryCellTool, prepareFactoryCellTool } from './factory-cell-tools.mjs'
+import { validateFactoryCellDraft, factoryPlacementAdmissionScope, ensureCommittedFactoryCellBeforeClose, recoverCommittedFactoryBlockClose, ensureFactoryCellBeforeGoalCompletion, atFactoryCellBoundary, FactoryCellBoundaryError, directFeedSingletonPlacementRefusal } from './factory-cell-enrollment.mjs'
+import { reconcileFactoryCellUse, factoryDeliveryWindowPending, relevantFactoryAssignments, assignedFactoryConflict } from './factory-cell-use.mjs'
+import { recoverFactoryCellUse, validFactoryRecoveryWake } from './factory-cell-use-recovery.mjs'
+import { factoryLifecycleOperation, factoryLifecycleRuntime, claimFactoryLifecycleOperation, settleFactoryLifecycleOperation, retainUnsentFactoryLifecycleOperation, bindTemporaryFactoryPlacement } from './factory-cell-lifecycle-runtime.mjs'
+import { reassignEmptyFactoryFurnace, captureFactoryLifecycleCloseProof, closeFactoryCellLifecycles, isFactoryLifecycleControllerActive, validateFactoryLifecycleOperation } from './factory-cell-lifecycle-controller.mjs'
+import { captureFactoryPlacementContext, deriveFactoryPlacementReceipt } from './factory-placement-provenance.mjs'
 import { normalizeHarnessDefaults } from './production-repair.mjs'
 import { discardContractPrediction, startContractPrediction, takeContractPrediction } from './contract-prediction.mjs'
 import { obligationContractContext, captureObligationProof, compileObligations, obligationContractMatches, outcomeOnlyCheckpoint, obligationProofOrigin, storedObligations, preservationFailure, normalizeFluidReceiptBinding, PreservationProofError } from './contract-obligations.mjs'
 import { prepareProgressAttempt, bindProgressAttempt, auditExecutorProgress, completeProgressReview } from './executor-progress-audit.mjs'
 import { preservationObservationAdmission, preservationReobservationVerified } from './preservation-recovery.mjs'
-import { recoverContractObligations, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe, prepareFluidPreservationAdmission, checkFluidPreservationEligibility, confirmFluidCandidateArgumentUnsent, constructionPlanWitnessCommand } from './contract-obligation-runtime.mjs'
+import { recoverContractObligations, capturePlannerObligationProof, verifyPreservationBeforeClose, reconcilePreservationProof, stepCloseSettlementUnsafe, prepareFluidPreservationAdmission, checkItemPreservationAdmission, checkFluidPreservationEligibility, confirmFluidCandidateArgumentUnsent, constructionPlanWitnessCommand } from './contract-obligation-runtime.mjs'
 import { normalizeObservationRequest, observationRecoveryBasis, localFluidSearchFact } from './targeted-observation.mjs'
 import { renderPlacementCandidatesResult } from './placement-candidates-render.mjs'
 import { candidateScopeVerdict, committedPlacementRegions, compilePlacementScope, describeRegion, distanceFromAnchor, resolvedPlacements } from './placement-region.mjs'
@@ -108,6 +121,7 @@ import { cleanMemoryText, sanitizeDurableModelText, sanitizeDurableModelValue } 
 import { normalizeProviderPlanContent, providerCapabilityProfile } from './provider.mjs'
 import { actorChanged, deploymentStatus, executeAuthorizedBatch } from './supervisor-adapter.mjs'
 import { OPERATION_LEDGER_LIMIT } from './operation-ledger.mjs'
+import { nativeAdmissionJournal } from '../staging/native-admission-journal.mjs'
 import {
   batchWatermark,
   buildPendingOperation,
@@ -123,6 +137,7 @@ import {
   reconciliationFacts,
   reconciliationGuidance,
   RECONCILE_VERDICT,
+  TERMINAL_TRANSFER_REFUSAL_CAUSES,
 } from './operation-reconciliation.mjs'
 import {
   boundarySteeringGate,
@@ -241,6 +256,7 @@ export { AgentLoopError }
 // Intake exists before the base loop has an active turn, epoch or request id.
 // Its async scope also fences nested advisory/read helpers and queued writes.
 const requestAdmissionScope = new AsyncLocalStorage()
+const deferredAdmissionWakes = new WeakMap()
 
 const TRACE_MAX_BYTES = 5 * 1024 * 1024
 const TRACE_FILES = 5
@@ -346,7 +362,7 @@ const PRODUCTION_REPAIR_LIMIT = 1
 const REVIEW_READ_REOPEN_STEP_LIMIT = 64
 const REVIEW_NOTES_CHARS = MAX_REVIEW_NOTES_CHARS
 // What the planner's one review round can do (handlePlannerReview). Facts about the harness, not strategy advice.
-const REVIEW_ROUND_FACT = '[HARNESS] This is the one planner review round for this step. The committed plan and its execution_guidance cannot change in it. A reply with operations:[] returns the same active step to a fresh executor, and that reply\'s chatMessage reaches the executor as planner notes. Read tools are available before replying. Another review of this step pauses the goal.'
+const REVIEW_ROUND_FACT = '[HARNESS] Review the structured refusal and current facts. You may revise the working plan, its objectives and executor boundaries inside the unchanged user goal/grant. To revise, return workingPlanRevision:true, operations:[], currentStep:0, the remaining plan, aligned stepCompletions and executionGuidance. Omit goal: acceptance and permissions cannot change. Return the unchanged plan without new declarations to send advisory notes. Native assignments/protections/reservations still apply; no unsettled action may be replayed. Replanning does not refresh goal effort.'
 // Board evidence kind for an executed operation the engine refused in a way the
 // planner can correct (a placement refused at its chosen coordinate). The board
 // memory records it instead of freezing the plan and blocks once the bounded
@@ -718,6 +734,7 @@ Before a non-empty operation batch, chatMessage should tell the human what concr
 
 The harness may add a [REQUIREMENTS] block while you author or revise a plan, and may send it once as a correction right after your first plan. It is authoritative live game data read from the running game: which recipes and machines needed for the goal's targets are still locked, which technology unlocks each, and the dependency-ordered research with each node's exact kind (lab science, or a trigger completed by performing its exact trigger). Your roadmap and plan must order the unlocking research before any node or step that needs a locked recipe or machine; never plan to craft or build something the block lists as locked before that research is done. It supplies facts only: you still write the goal, shelf and plan.
 
+Authored knowledge is separate reference material. Use findKnowledge and getKnowledgeDetails explicitly when a concept needs clarification; either role may read it without acquiring planning or mutation authority. References appear only as requested tool results, never skillIds or automatically loaded instructions. Query live deterministic tools for current game facts.
 Skill lifecycle distinguishes discovery from loaded details. findSkills and [SKILL_OFFERS] cards are discovery only. At planning boundaries the harness opens a bounded set of ranked details into [SKILL_CONTEXT]. Before following any other discovered skill, call getSkillDetails for that exact id. [SKILL_CONTEXT] contains only details actually opened for the current logical task. Compare their time savings and setup cost; patterns are options, not required layouts. Reuse their structure and constraints, but revalidate mutable world state, recipes, inventory, geometry, and placement with live deterministic tools before acting.
 
 ### Complete operation list
@@ -919,7 +936,7 @@ function safeConditionWait(value) {
   if (!value || typeof value !== 'object' || value.state !== 'active') return undefined
   const condition = value.condition
   if (!condition || typeof condition !== 'object') return undefined
-  if (!['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state'].includes(condition.kind)) return undefined
+  if (!['inventory_count', 'entity_inventory_count', 'entity_exists', 'entity_state', 'starter_acceptance'].includes(condition.kind)) return undefined
   if (['entity_inventory_count', 'entity_exists', 'entity_state'].includes(condition.kind)
     && (!Number.isSafeInteger(condition.unit_number) || condition.unit_number < 1)) return undefined
   if (['inventory_count', 'entity_inventory_count'].includes(condition.kind)
@@ -940,6 +957,7 @@ function safeConditionWait(value) {
     step_id: cleanMemoryText(value.step_id, 80),
     actor_id: value.actor_id,
     actor_epoch: value.actor_epoch,
+    ...(condition.kind === 'starter_acceptance' ? { actor_session: cleanMemoryText(value.actor_session, 160), observation_id: cleanMemoryText(value.observation_id, 160) } : {}),
     mode: value.mode === 'passive_progress' ? 'passive_progress' : 'completion',
     condition: safeCondition,
     state: 'active',
@@ -3122,6 +3140,13 @@ export function restatedPlanVerdict(incoming, committed, activeIndex = 0) {
 }
 
 export class NpcAgentLoop extends BaseNpcAgentLoop {
+  // Only returned provider messages can own a model-effort charge. Private
+  // identity maps cannot be forged by model JSON or deterministic controllers.
+  #providerEffort = new WeakMap()
+  #exhaustedEffortPlans = new WeakMap()
+
+  ensureFactoryCellClose(owner) { return ensureCommittedFactoryCellBeforeClose(this, owner) }
+
   constructor(options) {
     // Programmatic v1 callers can replay historical packets; deployed supervisors always select v2.
     const memory = options.memory ?? new NpcDialogueMemory()
@@ -3523,8 +3548,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   rolePrefixMessages(role) {
     if (this.completionProtocolVersion >= 3) {
       const sharedPrompt = protocol3SharedPrompt(this.systemPrompt)
-      const executorPrompt = sharedPrompt.replace(DURABLE_PLAN_PROMPT,
-        `${EXECUTOR_STATE_PROMPT}\n\n### Complete operation list\n\n${approvedOperationListText()}.`)
+      const executorPrompt = protocol3SharedPrompt(this.systemPrompt.replace(DURABLE_PLAN_PROMPT,
+        `${EXECUTOR_STATE_PROMPT}\n\n### Complete operation list\n\n${approvedOperationListText()}.`))
       const ratePrompt = role === EXECUTOR_ROLE && this.executorObservationRate
         ? '\n[OBSERVATION RATE] Fresh native reads replenish over time; CONTROL_DECISION_STATE reports the burst, refill interval and available tokens. The harness waits for credit without another model call. Reuse cached facts first. Do not poll, change the plan or invent gameplay waits to refill credit. Closed-round, targeted-read, no-progress and total-call guards still apply.' : ''
       return [{ role: 'system', content: `${role === EXECUTOR_ROLE ? executionOnlyPrompt(roleSystemPrompt(executorPrompt, role)) : sharedPrompt}\n\n${role === EXECUTOR_ROLE ? EXECUTION_ONLY_PROMPT : PLANNING_ONLY_PROMPT}${ratePrompt}` }]
@@ -3558,7 +3583,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       'The planner chooses strategy and completion conditions, never gameplay operations. Resubmit operations:[] with the plan and aligned executionGuidance; the executor chooses actions after commit.')
     if (plan.plannerReview !== undefined) throw this.roleContractError('invalid_planner_review', 'Only an executor may request plannerReview')
     const held = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
-    if (Array.isArray(plan.plan) && plan.plan.length > 0 && !FROZEN_PLAN_STATUSES.has(held?.status) && plan.assessmentOnly !== true) {
+    if (Array.isArray(plan.plan) && plan.plan.length > 0 && (!FROZEN_PLAN_STATUSES.has(held?.status) || this.workingRevisionCandidate(plan)) && plan.assessmentOnly !== true) {
       let guidance
       try { guidance = normalizeExecutionGuidance(plan.executionGuidance, plan.plan.length) }
       catch (cause) { throw this.roleContractError('invalid_execution_guidance', cause.message) }
@@ -3617,7 +3642,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return this.runTurn()
   }
 
-  async handlePlannerReview(plan, stepId, { harnessRaised = false } = {}) {
+  async handlePlannerReview(plan, stepId, { harnessRaised = false, strictPersistence = false } = {}) {
     const review = normalizePlannerReview(plan.plannerReview)
     if (this.completionProtocolVersion < 3 || this.agentContext.role !== EXECUTOR_ROLE || plan.operations?.length !== 0 || plan.semanticCompletion || plan.checkpoint) {
       throw this.roleContractError('invalid_planner_review', 'plannerReview must be an executor decision with empty operations and no completion claim')
@@ -3695,12 +3720,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (woke !== undefined) return woke
     }
     await assertReviewCurrent()
-    // Run AC: a review used to end the request in a guard pause that nothing resumes. Each step now gets one
-    // in-turn planner round (durable, capped per goal). The committed plan cannot change in it; an empty reply
-    // returns the same step to a fresh executor with the planner's notes. A second review of the step pauses.
-    // Runs AD-AF: that pause was guard, which nothing resumes, so an unattended goal ended about 8 minutes in. A review is
-    // advisory model output, not world evidence, so the pause is model_recoverable: the supervisor's bounded auto-resume
-    // (MODEL_RECOVERABLE_RESUME_LIMITS, per step and per goal) restages a fresh executor onto the same step.
+    // Reviews spend the durable goal allowance; verified native progress alone
+    // refreshes it. Legacy review claims remain history, not an additional cap.
+    const effortClaimed = this.memory.spendGoalEffort?.(key, plan.factoryAssignmentEvidence
+      ? `assignment:${plan.factoryAssignmentEvidence.code}:${plan.factoryAssignmentEvidence.facts?.member?.unit_number}:${plan.factoryAssignmentEvidence.facts?.selected_resource}`
+      : plan.factoryFailureEvidence ? `factory:${plan.factoryFailureEvidence.code}` : `review:${review.reason}`) !== false
+    if (!effortClaimed) return this.pauseForExecutorCorrection('goal_no_progress_exhausted', activeStep.step_id, 'Goal effort exhausted without new relevant native progress; the goal and blocker history are preserved.')
     const continuing = held.status !== PLAN_STATUS.BLOCKED
       && this.memory.claimReviewContinuation?.(key, activeStep.step_id, { requestId }) === true
     const pause = () => {
@@ -3716,7 +3741,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       : `Execution paused for planner review (${review.reason}): ${review.rationale}`
     this.memory.remember(key, this.requestInfo.turnId, { sender: this.requestInfo.sender, user: this.requestInfo.text,
       assistant: `[Executor advisory; unverified] ${chatMessage}`, operations: [] })
-    await this.persistState()
+    await this.persistState({ strict: strictPersistence })
     await assertReviewCurrent()
     // Fold C3 into C8: an executor restaged at a step close that has done nothing since is kept through the round, so the
     // handback resumes it (foldReviewHandback) instead of rebuilding the same packet. Its review request is its last turn.
@@ -3725,12 +3750,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const returned = await this.returnControlToPlannerWithRetry({ route: 'executor_review', reason: 'executor_review', withinTurn: true, requestId,
       ...(kept ? { keepExecutor: { meta: kept, reply: JSON.stringify(plan) } } : {}) })
     await assertReviewCurrent()
-    const reviewMessage = `[EXECUTOR_REVIEW] Advisory from the executor, not world evidence or replacement authority. ${JSON.stringify({ planId: held.plan_id, stepId: activeStep.step_id, ...review, ...(harnessRaised && plan.progressAuditEvidence ? { harness_progress_audit: plan.progressAuditEvidence } : {}) })}`
+    const reviewMessage = `[EXECUTOR_REVIEW] Advisory from the executor, not world evidence or replacement authority. ${JSON.stringify({ planId: held.plan_id, stepId: activeStep.step_id, ...review, ...(harnessRaised && plan.progressAuditEvidence ? { harness_progress_audit: plan.progressAuditEvidence } : {}), ...(harnessRaised && plan.factoryAssignmentEvidence ? { factory_assignment_conflict: plan.factoryAssignmentEvidence } : {}) })}`
     try {
       if (continuing && returned.returned) {
-        this.reviewContinuation = { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id, executor_kept: Boolean(kept) && returned.resumed === true }
+        this.reviewContinuation = { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id, executor_kept: Boolean(kept) && returned.resumed === true,
+          strict_persistence: strictPersistence }
         await this.traceEvent('planner.review_round', { request_id: requestId, plan_id: held.plan_id, step_id: activeStep.step_id,
-          reason: review.reason, bound: 'one_planner_round_per_step', authority: 'advisory_only' })
+          reason: review.reason, bound: 'durable_goal_no_progress_effort', authority: 'advisory_only' })
         await assertReviewCurrent()
         const continued = await this.continueFromModMessage(`${reviewMessage}\n${REVIEW_ROUND_FACT}`, 'planner.review_round_continuation', { withinTurn: true })
         if (continued !== null) return continued
@@ -3744,7 +3770,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (continuing) {
       pause()
       chatMessage = `Execution paused for planner review (${review.reason}): ${review.rationale}`
-      await this.persistState()
+      await this.persistState({ strict: strictPersistence })
       await assertReviewCurrent()
     }
     if (returned.returned) this.messages.push({ role: 'user', content: reviewMessage })
@@ -3806,10 +3832,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const active = getActivePlanningPlan(held)
     const guidance = active?.steps?.[active.active_step_index]?.execution_guidance
     const skillIds = packetRole === EXECUTOR_ROLE && guidance ? guidance.skillIds
-      : this.loadedSkillContext instanceof Map ? [...this.loadedSkillContext.keys()].slice(-3) : []
+      : this.loadedSkillContext instanceof Map ? [...this.loadedSkillContext.values()].filter(skill => compactLoadedSkill(skill, skill?.id)).map(skill => skill.id).slice(-3) : []
     const state = skillIds.length > 0 && held.loaded_skill_ids === undefined ? { ...held, loaded_skill_ids: skillIds } : held
     return buildHandoffPacket({
       planningState: state,
+      factoryAssignments: relevantFactoryAssignments(this, state),
       role: packetRole,
       checkpoint,
       reason,
@@ -4621,7 +4648,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
    * Called right after a request's active plan became BLOCKED. Returns the continued turn's result when the planner was
    * woken, or undefined when the request should end blocked exactly as before (every skip is traced with its reason).
    */
-  async wakePlannerForReplacement({ trigger, preflight, existed = false, provenRefusal = false, refusalCode, batchMayHaveRun = false }) {
+  async wakePlannerForReplacement({ trigger, preflight, existed = false, provenRefusal = false, refusalCode, batchMayHaveRun = false, factoryWitness }) {
     if (!this.replacementWakeEnabled || !this.requestInfo || typeof this.memory.requestReplacementFromDraft !== 'function') return undefined
     const key = this.requestInfo.memoryKey
     const requestId = this.traceRequest?.id
@@ -4634,7 +4661,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!plan.committed_at) return skip(REPLACEMENT_WAKE_SKIP.PLAN_NOT_COMMITTED)
     if (batchMayHaveRun) return skip(REPLACEMENT_WAKE_SKIP.NOT_PROVABLY_UNEXECUTED)
     // The wake is for blockers the harness observed in the game, never for argument errors, authorization refusals or holds.
-    const evidence = blockerWorldEvidence({ trigger, preflight, existed, provenRefusal, refusalCode })
+    const evidence = trigger === 'factory_cell_resolution' && validFactoryRecoveryWake(factoryWitness)
+      && factoryWitness.goal_id === planning.goal.goal_id && factoryWitness.plan_id === plan.plan_id && factoryWitness.request_id === requestId
+      ? { ok: true, detail: 'fresh_factory_cell_resolution' } : blockerWorldEvidence({ trigger, preflight, existed, provenRefusal, refusalCode })
     if (!evidence.ok) return skip(REPLACEMENT_WAKE_SKIP.BLOCKER_NOT_WORLD_EVIDENCE, { evidence_detail: evidence.detail })
     if (plan.blocker?.user_choice) return skip(REPLACEMENT_WAKE_SKIP.USER_CHOICE_RECORDED)
     const grant = this.memory.currentGoalGrant?.(key)
@@ -4960,7 +4989,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     const state = this.memory.planningState?.(this.activePlanKey())
     const committed = state ? getActivePlanningPlan(state) : undefined
-    const authorable = !committed || [PLAN_STATUS.DRAFT, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY, PLAN_STATUS.COMPLETED, PLAN_STATUS.SUPERSEDED, PLAN_STATUS.CANCELLED].includes(committed.status)
+    // A plan that does not belong to the goal the reducer now holds is not this
+    // executor's to run: the goal changed under it (mid-prediction or mid-turn), so the
+    // reply cannot admit work for a goal whose owner has been replaced.
+    const planGoalStale = Boolean(committed && state.goal?.goal_id && committed.goal_id !== state.goal.goal_id)
+    const authorable = planGoalStale || !committed || [PLAN_STATUS.DRAFT, PLAN_STATUS.RUNTIME_VALIDATION, PLAN_STATUS.READY, PLAN_STATUS.COMPLETED, PLAN_STATUS.SUPERSEDED, PLAN_STATUS.CANCELLED].includes(committed.status)
     if (authorable) {
       const requestId = this.traceRequest?.id
       await this.traceEvent('executor.plan_semantics_ignored', {
@@ -4968,7 +5001,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         role: EXECUTOR_ROLE,
         handoff_id: this.agentContext.handoffId,
         plan_id: committed?.plan_id,
-        reason: `executor_cannot_author_plan:plan_status_${committed?.status ?? 'none'}`,
+        reason: planGoalStale ? 'executor_cannot_author_plan:plan_goal_not_current' : `executor_cannot_author_plan:plan_status_${committed?.status ?? 'none'}`,
         ignored_fields: ['plan', 'operations'],
         incoming_steps: Array.isArray(plan.plan) ? plan.plan.length : 0,
         committed_steps: committed?.steps?.length ?? 0,
@@ -5227,13 +5260,20 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const scope = this.currentTurnScope()
       return await this.turnScope.run(scope, async () => {
         this.restorePlannerSelectedSkills()
+        const stockBarrier = await continueStockDependencyBarrier(this)
+        if (stockBarrier !== undefined) return stockBarrier
         const interruptedRefresh = await recoverInterruptedEntityRefresh(this)
         if (interruptedRefresh !== undefined) return interruptedRefresh
         const gather = await recoverGatherFailure(this)
         if (gather !== undefined) return gather
-        const production = await continueProductionTask(this)
+        const production = await this.continueProductionWithCheckpoint()
         return production === undefined ? super.runTurn() : production
       })
+    }
+    catch (error) {
+      const recovery = await recoverFactoryCellUse(this, error)
+      if (recovery.handled) return recovery.result
+      throw error
     }
     finally {
       if (--this.turnDepth === 0) this.turnConversation = null
@@ -5242,11 +5282,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async runTurnRedriving(generation) {
     const requestTrace = this.traceRequest
+    let deferredWake
     for (let redrive = 0; ; redrive++) {
       try {
+        if (deferredWake) {
+          const wake = deferredWake
+          deferredWake = undefined
+          return await this.continueReconciledAdmissionWake(wake)
+        }
         return await this.runTurn()
       }
       catch (error) {
+        const wake = deferredAdmissionWakes.get(error)
+        if (wake) {
+          deferredAdmissionWakes.delete(error) // one continuation, never a replayable callback capability
+          if (generation !== this.generation || !this.active || this.traceRequest !== requestTrace) throw error
+          deferredWake = wake
+          continue
+        }
         if (error?.code !== STALE_REPLY_ERROR_CODE || generation !== this.generation || !this.active || this.traceRequest !== requestTrace) throw error
         this.turnConversation = null
         if (redrive >= STALE_REDRIVE_LIMIT) {
@@ -5257,6 +5310,40 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         await this.traceEvent('context.stale_reply_redriven', { attempt: redrive + 1, limit: STALE_REDRIVE_LIMIT })
       }
     }
+  }
+
+  async continueReconciledAdmissionWake({ owner, pending, wake, error, epoch, beforeSend }) {
+    const fence = () => {
+      this.assertCheckpointOwnerIdentity(owner)
+      this.assertModelRecoveryAllowed()
+      if (this.turnDepth !== 0 || this.requestAdmissionOwner !== owner.intakeToken
+        || this.pendingInteractionAmendment !== owner.amendment || JSON.stringify(this.epoch) !== epoch
+        || this.batchInFlight !== true || this.batchInFlightBeforeSend !== beforeSend || beforeSend !== false
+        || (this.memory.pendingOperations?.(owner.key) ?? []).length) throw new AgentLoopError('admission_refusal_wake_owner_changed')
+    }
+    fence()
+    // Reconciliation cleared the exact no-effect pending record. Make that and
+    // the blocker durable before releasing its in-flight marker at this boundary.
+    await this.persistState({ strict: true }); fence()
+    await this.traceEvent('operation.refusal_wake_pending', { request_id: pending.request_id, operation_key: pending.operation_key,
+      goal_id: pending.goal_id, plan_id: pending.plan_id, step_id: pending.step_id, reason: 'exact_no_effect_receipt_requires_idle_refresh' }); fence()
+    const deployment = await this.assertCurrent(); fence()
+    const raw = await this.readTaskStatusRaw(); fence()
+    let status
+    try { status = typeof raw === 'string' ? JSON.parse(raw) : raw } catch { throw new AgentLoopError('admission_refusal_wake_native_unknown') }
+    const journal = nativeAdmissionJournal(status?.admission_journal)
+    const result = reconcilePendingOperation(pending, { status, actor: { actor_id: this.epoch.actor_id, epoch: this.epoch.epoch } })
+    if (deployment.idle !== true || status?.task_state !== 'idle' || status.queue_empty !== true || status.queue_length !== 0
+      || status.active_batch || status.actor?.mining_state?.mining || !journal.known || journal.unresolved
+      || result.verdict !== RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION || result.effect !== EFFECT.NOT_HAPPENED
+      || result.applied_slots?.length) throw new AgentLoopError('admission_refusal_wake_native_unproven')
+    // No await between the final fresh native witness and release of this exact marker.
+    this.batchInFlight = false
+    this.batchInFlightBeforeSend = undefined
+    this.noteWorldMutation()
+    const continued = await this.wakePlannerForReplacement(wake)
+    if (continued !== undefined) return continued
+    throw error
   }
 
   // Every admission point calls assertCurrent (an RCON round trip) before it
@@ -5320,30 +5407,74 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
-  async persistState({ strict = false, requiredSkillHandoff } = {}) {
+  async persistState({ strict = false, requiredSkillHandoff, requiredFactoryMetadata, requiredNotebook } = {}) {
     this.assertRequestAdmission()
     if (!this.stateFile || typeof this.memory.snapshot !== 'function') {
+      if (requiredNotebook) throw new AgentLoopError('notebook_persistence_unavailable')
+      if (requiredFactoryMetadata) throw new AgentLoopError('factory_metadata_persistence_unavailable')
       if (requiredSkillHandoff && !this.allowEphemeralSkillHandoff) throw skillHandoffError('persistence_unavailable')
       return
     }
     const filename = this.stateFile
-    const snapshot = this.memory.snapshot()
-    if (requiredSkillHandoff) {
-      const records = Array.isArray(snapshot?.planner_skill_handoffs) ? snapshot.planner_skill_handoffs : []
-      const stored = records.find(entry => entry?.[0] === requiredSkillHandoff.scope.memory_key)?.[1]
-      if (JSON.stringify(stored) !== JSON.stringify(requiredSkillHandoff)) throw skillHandoffError('snapshot_missing_pinned_skills')
+    const metadataFence = () => {
+      requiredNotebook?.fence()
+      if (requiredFactoryMetadata) this.memory.assertFactoryMetadataPersistence(requiredFactoryMetadata.ticket, requiredFactoryMetadata.phase)
+    }
+    const capture = () => {
+      const snapshot = this.memory.snapshot()
+      if (requiredNotebook) snapshot.agent_notebooks = requiredNotebook.snapshot()
+      if (requiredFactoryMetadata) {
+        for (const name of ['factory_registry', 'factory_registry_world_id', 'factory_metadata_pending', 'factory_cell_observations', 'factory_registry_fault']) delete snapshot[name]
+        Object.assign(snapshot, this.memory.factoryMetadataPersistenceSnapshot(requiredFactoryMetadata.ticket, requiredFactoryMetadata.phase))
+      }
+      if (requiredSkillHandoff) {
+        const records = Array.isArray(snapshot?.planner_skill_handoffs) ? snapshot.planner_skill_handoffs : []
+        const stored = records.find(entry => entry?.[0] === requiredSkillHandoff.scope.memory_key)?.[1]
+        if (JSON.stringify(stored) !== JSON.stringify(requiredSkillHandoff)) throw skillHandoffError('snapshot_missing_pinned_skills')
+      }
+      return `${JSON.stringify(snapshot, null, 2)}\n`
     }
     const write = this.persistQueue.then(async () => {
       this.assertRequestAdmission()
+      metadataFence()
       await fsp.mkdir(path.dirname(filename), { recursive: true })
       this.assertRequestAdmission()
+      metadataFence()
       const temp = `${filename}.${process.pid}.tmp`
-      await fsp.writeFile(temp, `${JSON.stringify(snapshot, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
-      this.assertRequestAdmission()
+      // Retry ordinary snapshot churn in this queue, never by recursively
+      // enqueueing a write. Capabilities/handoffs get no implicit retry.
+      const attempts = requiredFactoryMetadata || requiredSkillHandoff || requiredNotebook ? 1 : 3
+      let persistedSnapshot
+      for (let attempt = 1; ; attempt++) {
+        this.assertRequestAdmission()
+        metadataFence()
+        const serialized = capture()
+        await fsp.writeFile(temp, serialized, { encoding: 'utf8', mode: 0o600 })
+        this.assertRequestAdmission()
+        metadataFence()
+        if (capture() === serialized) { persistedSnapshot = JSON.parse(serialized); break }
+        if (attempt >= attempts) {
+          const error = new AgentLoopError('canonical_state_changed_during_persistence')
+          error.code = 'canonical_persistence_churn_exhausted'
+          error.attempts = attempts
+          throw error
+        }
+      }
       await fsp.rename(temp, filename)
+      requiredNotebook?.commit(persistedSnapshot.agent_notebooks)
+      this.memory.markFactoryLifecyclePersisted?.(persistedSnapshot)
+      if (requiredFactoryMetadata) {
+        this.memory.markFactoryMetadataPersisted(requiredFactoryMetadata.ticket, requiredFactoryMetadata.phase)
+        this.assertRequestAdmission()
+        this.memory.assertFactoryMetadataOwner(requiredFactoryMetadata.ticket)
+      }
     })
     this.persistQueue = write.catch(error => this.log(`[memory] durable NPC state write failed: ${error instanceof Error ? error.message : String(error)}`))
-    return strict ? write : this.persistQueue
+    // Ordinary callers must not acknowledge a new control/goal after churn
+    // exhaustion. Keep the serial queue usable and legacy I/O logging intact.
+    return strict ? write : write.catch(error => {
+      if (error?.code === 'canonical_persistence_churn_exhausted') throw error
+    })
   }
 
   activePlanKey() {
@@ -5412,14 +5543,17 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const guidance = held?.steps?.[held.active_step_index]?.execution_guidance
     const policy = skillDiscoveryPolicy(this)
     const skills = [...this.loadedSkillContext.values()]
+      .map(skill => compactLoadedSkill(skill, skill?.id)).filter(Boolean)
       .filter(skill => !separatedExecution || guidance?.skillIds?.includes(skill.id))
       .slice(-policy.rendered)
     if (skills.length === 0) return ''
     while (skills.length > 1 && JSON.stringify(skills).length > policy.chars) skills.shift()
     const payload = JSON.stringify(skills)
     if (payload.length > policy.chars) return ''
-    if (separatedExecution) return `[SKILL_CONTEXT] Planner-selected skill instructions supplied by the harness for the active execution_guidance.skillIds references. Use these details without searching or reopening the library. Revalidate mutable world facts before acting.\n${payload}`
-    return `[SKILL_CONTEXT] Loaded SGLuna skill details for this logical task, opened by the harness or getSkillDetails. Compare time savings with setup cost; these are optional strategies, not required layouts or authoritative live world state. Revalidate mutable facts before acting.\n${payload}`
+    const libraryNote = skills.some(skill => skill.content_type !== undefined)
+      ? ' Skill entries describe procedures; knowledge references are retrieved separately on demand. Levels indicate complexity, not verified ability or availability. Required capabilities must be available through current admitted tools. Read recipes and sizing from the live game; these entries grant no execution or completion authority.' : ''
+    if (separatedExecution) return `[SKILL_CONTEXT] Planner-selected skill instructions supplied by the harness for the active execution_guidance.skillIds references. Use these details without searching or reopening the library. Revalidate mutable world facts before acting.${libraryNote}\n${payload}`
+    return `[SKILL_CONTEXT] Loaded SGLuna skill details for this logical task, opened by the harness or getSkillDetails. Compare time savings with setup cost; these are optional strategies, not required layouts or authoritative live world state. Revalidate mutable facts before acting.${libraryNote}\n${payload}`
   }
 
   // Two defects lived in the inherited compaction:
@@ -5490,7 +5624,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       while (end < this.messages.length && this.messages[end].role === 'tool') end++
       const removed = this.messages.splice(start, end - start)
       this.carryConversationState('fold')
-      const summary = this.summarizeToolExchange(removed)
+      // Preserve aligned world results from mixed historical exchanges, never reference bodies.
+      const observations = withoutKnowledgeExchange(removed)
+      if (observations.length === 0) continue
+      const summary = this.summarizeToolExchange(observations)
       const previous = this.messages[start - 1]
       if (previous?.role === 'user' && typeof previous.content === 'string' && previous.content.startsWith('[OBSERVATIONS COMPACTED]')) {
         previous.content = cleanMemoryText(`${previous.content}\n${summary}`, 12000)
@@ -5775,6 +5912,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // A placement-candidate read reaches the model with its legal candidates first and its rejected-footprint samples
   // labelled and last (placement-candidates-render.mjs); every other answer is delivered as read.
   renderToolOutput(toolName, raw, limit) {
+    if (['findSkills', 'getSkillDetails'].includes(toolName)) return sanitizeLibraryToolOutput(toolName, raw)
     return toolName === 'getPlacementCandidates' ? renderPlacementCandidatesResult(raw, limit) : super.renderToolOutput(toolName, raw, limit)
   }
 
@@ -7064,6 +7202,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  // Historical evidence only: callers capture context before reading native state.
+  // No fallback to the current plan, legacy NPC list, or a later request owner.
+  retainFactoryPlacementReceipt(raw, context) {
+    let status
+    try { status = typeof raw === 'string' ? JSON.parse(raw) : raw }
+    catch { return { status: 'unavailable', reason: 'native_status_unreadable' } }
+    const receipt = deriveFactoryPlacementReceipt(status, context)
+    if (!receipt) return { status: 'unavailable', reason: 'exact_placement_provenance_missing' }
+    try { return this.memory.recordFactoryPlacementReceipt(receipt, context.generation) }
+    catch (error) {
+      // This is the derived native witness, never a model-supplied error field.
+      // Preserve its original owner even when the evidence store refuses it.
+      Object.defineProperty(error, 'factoryPlacementReceipt', { value: receipt })
+      throw error
+    }
+  }
+
   recordPlacementReceipt(raw) {
     let parsed
     try { parsed = typeof raw === 'string' ? JSON.parse(raw) : raw }
@@ -7318,6 +7473,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // admit it, no wait is registered and the caller takes its ordinary path instead of waiting on a step
   // that can never close. Returns the updated plan state, or undefined when nothing was registered.
   async registerCandidateConditionWait(candidate, { freshMachine, readScope } = {}) {
+    await atFactoryCellBoundary(this, 'wait_commit', () => reconcileFactoryCellUse(this, { phase: 'wait_commit' }))
     if (!candidate || !this.requestInfo) return undefined
     const key = this.requestInfo.memoryKey
     const generation = readScope?.generation ?? this.generation
@@ -7662,6 +7818,16 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // The fresh machine read a blind wait's receipt carries (repair unit B). Fact reporting only: the line says
   // what the machines hold now and that elapsed time proves nothing. Never throws except on an epoch change.
+  // True once per delivery-window decline, for a wait-only batch receipt of the same goal, plan and step.
+  deliveryWindowWaitCompleted(receipt) {
+    const pending = this.deliveryWindowPending
+    const types = receipt?.view?.last_completed_batch?.task_types
+    if (!pending || !Array.isArray(types) || types.length === 0 || !types.every(type => type === 'waiting')) return false
+    this.deliveryWindowPending = undefined
+    const owner = this.captureCheckpointOwner()
+    return owner.goalId === pending.goalId && owner.planId === pending.planId && owner.stepId === pending.stepId
+  }
+
   async blindWaitReceiptFacts(receipt) {
     const types = receipt?.view?.last_completed_batch?.task_types
     const waitOnly = Array.isArray(types) && types.length > 0 && types.every(type => type === 'waiting')
@@ -7724,6 +7890,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!state || state.status !== 'active' || !rawWait || rawWait.state !== 'active') {
       return { action: 'absent', healthy: false, state }
     }
+    const factoryUse = rawWait.condition?.kind === 'starter_acceptance' ? {}
+      : await atFactoryCellBoundary(this, 'wait_poll', () => reconcileFactoryCellUse(this, { phase: 'wait_poll' }))
 
     const wait = safeConditionWait(rawWait)
     const identity = {
@@ -7767,7 +7935,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         },
       }
     }
-    if (!conditionWaitLifecycleMatches(wait, before)) {
+    if (!conditionWaitLifecycleMatches(wait, before) || wait.condition.kind === 'starter_acceptance' && wait.actor_session !== before.session) {
       return {
         action: 'failed',
         healthy: false,
@@ -7784,7 +7952,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
     let observation
     try {
-      observation = JSON.parse(String(await this.rcon.command(runtimeConditionCommand(wait.condition))).trim())
+      if (wait.condition.kind === 'starter_acceptance') {
+        const result = await this.evaluateGoalCompletion({ record: false })
+        observation = { ok: true, satisfied: result?.satisfied === true }
+      } else observation = JSON.parse(String(await this.rcon.command(runtimeConditionCommand(wait.condition))).trim())
     }
     catch (error) {
       observation = { error: `condition_transport_error:${cleanMemoryText(error instanceof Error ? error.message : String(error), 160)}` }
@@ -7816,7 +7987,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       || current.condition_wait?.id !== identity.wait_id) {
       return { action: 'stale', healthy: false, state: current, wait, identity }
     }
-    if (!conditionWaitLifecycleMatches(wait, after)) {
+    if (!conditionWaitLifecycleMatches(wait, after) || wait.condition.kind === 'starter_acceptance' && wait.actor_session !== after.session) {
       return {
         action: 'failed',
         healthy: false,
@@ -7832,6 +8003,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
 
     const normalizedObservation = normalizedConditionObservation(observation)
+    if (factoryUse.delivery_required && !factoryUse.delivery_ready) normalizedObservation.satisfied = false
     // Plan 2.5: the machine's expected finish from game data sets the wake
     // deadline and the expected finish the planner sees.
     const schedule = scheduleWait(wait, normalizedObservation.eta)
@@ -7865,7 +8037,64 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  async pollStarterAcceptance(wait) {
+    const key = this.activePlanKey()
+    const current = () => this.memory.currentPlan?.(key)
+    const planning = this.memory.planningState?.(key)
+    if (planning?.run?.paused || planning?.goal?.status !== 'active' || current()?.condition_wait?.id !== wait.id) return { action: 'stale' }
+    const actor = await this.captureEpoch()
+    if (!conditionWaitLifecycleMatches(wait, actor) || wait.actor_session !== actor.session
+      || this.memory.pendingOperation?.(key) || actor.idle !== true) {
+      this.memory.clearConditionWait(key, wait.id)
+      await this.persistState({ strict: true })
+      return { action: 'failed', wait_id: wait.id, reason: 'starter_acceptance_reconciliation_required', state: current() }
+    }
+    this.epoch = actor
+    const evaluation = await this.evaluateGoalCompletion({ record: false })
+    if (current()?.condition_wait?.id !== wait.id || this.memory.planningState?.(key)?.run?.paused) return { action: 'stale' }
+    if (evaluation?.satisfied) {
+      // Finalization owns this bounded native-only turn; no model request or
+      // effort allowance is created by waiting. Factory close guards require an active owner.
+      if (this.active) return { action: 'stale' }
+      this.active = true
+      const generation = this.generation
+      try {
+        const finished = await this.finishIfGoalMet({ chatMessage: '' }, current())
+        if (finished?.goalStatus === 'completed') {
+          const completed = this.memory.planByNpc.get(key)
+          await this.persistState({ strict: true })
+          if (this.generation !== generation) return { action: 'stale' }
+          try {
+            const stopped = JSON.parse(String(await this.rcon.command(goalConditionCommand({ kind: 'automated_starter_base', acceptance_key: wait.goal_id, observation_id: wait.observation_id, stop_observation: true }))))
+            if (stopped?.stopped !== true) throw new Error(stopped?.error ?? 'native_stop_unconfirmed')
+          } catch (error) {
+            // The native ten-minute TTL independently ends this bounded sampler.
+            await this.traceEvent('goal.starter_observation_stop_failed', { goal_id: wait.goal_id, reason: String(error.message ?? error).slice(0, 160) })
+          }
+          if (this.generation !== generation) return { action: 'stale' }
+          return { action: 'verified', wait_id: wait.id, state: completed, chat_message: finished.chatMessage }
+        }
+      } finally { if (this.generation === generation) this.active = false }
+    }
+    const checks = wait.checks + 1
+    if (Date.now() - wait.registered_at >= wait.timeout_ms || checks >= wait.max_checks) {
+      this.memory.clearConditionWait(key, wait.id)
+      await this.persistState({ strict: true })
+      await this.traceEvent('goal.starter_observation_exhausted', { goal_id: wait.goal_id, wait_id: wait.id, results: evaluation?.results })
+      return { action: 'timeout', wait_id: wait.id, reason: 'starter_acceptance_unmet', state: current() }
+    }
+    const state = this.memory.updateConditionWait(key, { ...wait, checks, updated_at: Date.now() })
+    await this.persistState({ strict: true })
+    return { action: 'waiting', wait_id: wait.id, state }
+  }
+
   async pollConditionWait() {
+    const starterWait = this.memory.currentPlan?.(this.activePlanKey())?.condition_wait
+    if (starterWait?.state === 'active' && starterWait.condition?.kind === 'starter_acceptance') {
+      if (this.conditionPollPromise) return this.conditionPollPromise
+      this.conditionPollPromise = this.pollStarterAcceptance(starterWait)
+      try { return await this.conditionPollPromise } finally { this.conditionPollPromise = null }
+    }
     if (this.conditionPollPromise) return this.conditionPollPromise
     this.conditionPollPromise = (async () => {
       const generation = this.generation // the slice-progress credit for a satisfied wait belongs to this lineage only
@@ -8535,7 +8764,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && (completedSliceRecovery || (!this.actionOmissionRepairActive && !this.freshContextRecoveryInProgress))
   }
 
-  async validateStepCompletionDeclarations(plan) {
+  async validateStepCompletionDeclarations(plan, { revising = false } = {}) {
     const planning = this.memory.planningState?.(this.activePlanKey())
     const held = getActivePlanningPlan(planning)
     if (held?.status === PLAN_STATUS.BLOCKED && this.agentContext.role === EXECUTOR_ROLE) {
@@ -8547,7 +8776,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       })
       return
     }
-    if (FROZEN_PLAN_STATUSES.has(held?.status)) {
+    if (!revising && FROZEN_PLAN_STATUSES.has(held?.status)) {
       const step = held.steps?.[held.active_step_index]
       const declaredTransition = plan.semanticCompletion?.stepId === step?.step_id
         && held.steps?.[held.active_step_index + 1]?.completion_mode === 'deterministic'
@@ -8571,7 +8800,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       error.code = 'missing_step_completions'
       throw error
     }
-    const plannerOnlyDraft = this.plannerOnlyDraftCandidate(plan)
+    const plannerOnlyDraft = revising || this.plannerOnlyDraftCandidate(plan)
     if (this.requireTypedObligations && plan.assessmentOnly !== true
       && plan.stepCompletions.some(row => row.kind === 'deterministic' && !row.obligations)) {
       const error = new AgentLoopError('typed_step_obligations_required: declare obligations {outcome:{mode:"all",requirements:[...]},preserve:[exact unit numbers]} for each deterministic step. Outcomes describe intended results; preserve identifies existing structures and cannot be replaced by added global counts. No draft was committed.')
@@ -8628,7 +8857,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         if (!completionContractSupported(compiled, obligationContractContext(declaration.obligations))) throw await this.checkpointRejectionError({ reason: 'typed_compilation_unrepresentable' })
         if (!declaration.checkpoint && (index === plan.currentStep || index === firstReducerIndex)) declaration.checkpoint = compiled
         const owner = this.captureCheckpointOwner()
-        declaration.obligationProof = await captureObligationProof(this, declaration.obligations, () => this.assertCheckpointOwnerCurrent(owner))
+        declaration.obligationProof = await capturePlannerObligationProof(this, declaration.obligations, () => this.assertCheckpointOwnerCurrent(owner))
         if (declaration.checkpoint && !obligationContractMatches(declaration.checkpoint, declaration.obligations)) {
           // Every recorded mismatch (Runs AW-BA, both planner models) was this shape: the outcome restated without the
           // preservation rows. The harness owns those rows, so it compiles them instead of spending a correction round.
@@ -8824,6 +9053,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async applyStepClose(trigger, { key, step, contract, results, reasonCode, source, plannerStep, extraEvidence = [], steeringRecommendation }) {
+    if (isFactoryLifecycleControllerActive(this)) return { closed: false, reason: 'factory_lifecycle_controller_active' }
     const generation = this.generation // the slice-progress credit below belongs to this lineage only
     const requestId = this.traceRequest?.id
     const closeOwner = this.captureCheckpointOwner()
@@ -8844,6 +9074,45 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return { closed: false, reason: preservation.reason,
         contractPause: await this.pauseForStepContract({ reason: preservation.reason, owner }) }
     }
+    try {
+      if ((this.memory.factoryTemporaryAssets?.() ?? []).length || (this.memory.factoryLifecycleTransactions?.() ?? []).some(tx => !['retired', 'installed'].includes(tx.state))) {
+        const proof = captureFactoryLifecycleCloseProof(this, closeOwner, { key, step, contract, results, reasonCode, source })
+        const previousMutation = this.worldMutationSeq
+        await closeFactoryCellLifecycles(this, { proof })
+        await this.assertCheckpointOwnerCurrent(closeOwner)
+        if (this.worldMutationSeq !== previousMutation) {
+          const facts = await this.completionFactsForContract(contract, undefined, [], { committedIdentity: true })
+          await this.assertCheckpointOwnerCurrent(closeOwner)
+          const evaluation = this.evaluateCompletionContract(contract, facts)
+          if (!evaluation.satisfied) return { closed: false, reason: 'factory_lifecycle_checkpoint_revalidation_required' }
+          results = evaluation.results
+        }
+      }
+      await this.ensureFactoryCellClose(closeOwner)
+    }
+    catch (error) {
+      if (!await recoverCommittedFactoryBlockClose(this, error, closeOwner)) {
+        this.assertCheckpointOwnerIdentity(closeOwner)
+        const enrollmentUnsafe = stepCloseSettlementUnsafe(this)
+        if (enrollmentUnsafe) return this.deferStepClose(trigger, enrollmentUnsafe, closeOwner)
+        const reason = error.code ?? 'factory_enrollment_failed'
+        // Only the first frame of the delivery window exists; the step stays open
+        // unpaused and the executor is told that a native wait completes it.
+        if (factoryDeliveryWindowPending(error)) {
+          this.deliveryWindowPending = { goalId: closeOwner.goalId, planId: closeOwner.planId, stepId: closeOwner.stepId }
+          return this.declineStepClose(trigger, reason, { active_step_id: step.id,
+            observation: error.details.selected.delivery.observation.code, goal_id: closeOwner.goalId, plan_id: closeOwner.planId })
+        }
+        await this.traceEvent('factory_cell.enrollment_close_refused', { request_id: requestId, trigger, reason,
+          observation: error.details?.selected?.delivery?.observation?.code,
+          goal_id: closeOwner.goalId, plan_id: closeOwner.planId, step_id: closeOwner.stepId })
+        this.assertCheckpointOwnerIdentity(closeOwner)
+        return { closed: false, reason, contractPause: await this.pauseForStepContract({ reason, owner: closeOwner }) }
+      }
+    }
+    await this.assertCheckpointOwnerCurrent(closeOwner)
+    const enrollmentUnsafe = stepCloseSettlementUnsafe(this)
+    if (enrollmentUnsafe) return this.deferStepClose(trigger, enrollmentUnsafe, closeOwner)
     const reduced = this.memory.applyOutcomeAuthority?.(key, {
       kind: 'verified_complete',
       source: 'deterministic_runtime',
@@ -9138,6 +9407,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!outcome.ok) return failed(outcome.reason, outcome.attempts)
     await this.assertCheckpointOwnerCurrent(owner)
     if (step.obligations && this.currentPendingAmendment()) return { ok: true, skipped: true, deferred: 'pending_amendment' }
+    await atFactoryCellBoundary(this, 'activation', () => reconcileFactoryCellUse(this, { phase: 'activation', step: { ...step, completion_contract: outcome.contract } }))
+    await this.assertCheckpointOwnerCurrent(owner)
     const bound = this.memory.bindStepCompletionContract?.(key, {
       planId: plan.plan_id, stepId: step.step_id, contract: outcome.contract, binding: outcome.prediction ? 'prediction' : 'just_in_time', requestId,
     })
@@ -9233,18 +9504,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // the active step's durable verified ledger. Prose-only and controller-state contracts never close here. The step it closes is always the one active right now, so a
   // second call (or the ordinary close after it) finds the next step and cannot close this one twice.
   async closeActiveStepOnFreshRead({ previousState, trigger, operations = [] }) {
-    if (preservationObservationAdmission(this, operations)) return { closed: false }
+    if (activeStockDependencyBarrier(this)) return { closed: false, reason: 'stock_dependency_barrier_pending' }
+    if (preservationObservationAdmission(this, operations)) return { closed: false, reason: 'preservation_observation_pending' }
     const key = this.requestInfo?.memoryKey
     const board = previousState?.task_board
     const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
     const step = activeIndex === undefined ? undefined : board?.steps?.[activeIndex]
-    if (!key || previousState?.status !== 'active' || !step) return { closed: false }
+    if (!key || previousState?.status !== 'active' || !step) return { closed: false, reason: 'active_checkpoint_owner_missing' }
     const reducerPlan = getActivePlanningPlan(this.memory.planningState?.(key))
-    if (!FROZEN_PLAN_STATUSES.has(reducerPlan?.status)) return { closed: false }
+    if (!FROZEN_PLAN_STATUSES.has(reducerPlan?.status)) return { closed: false, reason: 'checkpoint_plan_not_frozen' }
     const recoveryRequestId = this.traceRequest?.id
     // Typed pending activation has no authored contract to repair. Bind its complete
     // unchanged intent before settlement or admission can mistake null for a defect.
     const canonicalStep = reducerPlan.steps[reducerPlan.active_step_index]
+    if ([...(this.memory.productionTasks?.values() ?? [])].some(task => task.status === 'active'
+      && task.owner.goal_id === reducerPlan.goal_id && task.owner.plan_id === reducerPlan.plan_id
+      && task.owner.plan_version === reducerPlan.plan_version && task.owner.step_id === canonicalStep?.step_id)) {
+      return { closed: false, reason: 'production_controller_pending' }
+    }
     if (canonicalStep?.obligations && isStepContractPending(canonicalStep)) {
       if (this.currentPendingAmendment() || this.batchInFlight || this.memory.pendingOperation?.(key)
         || this.memory.currentPlan?.(key)?.condition_wait || this.memory.planningState?.(key)?.run?.paused) return { closed: false }
@@ -9254,7 +9531,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const contractRecovery = await recoverContractObligations(this, { trigger })
     if (contractRecovery !== undefined) return { closed: false, contractRecovery, recoveryRequestId }
     const contract = this.persistedStepCheckpoint(this.memory.currentPlan?.(key)?.task_board, step.id)?.contract
-    if (!contract || !freshSettlementContract(contract, this.currentContractContext())) return { closed: false }
+    if (!contract || !freshSettlementContract(contract, this.currentContractContext())) return { closed: false, reason: 'checkpoint_requires_non_world_evidence' }
     const continuationOwner = this.captureCheckpointOwner()
     const identity = {
       goalId: previousState.goal_id, canonicalGoalId: this.memory.planningState?.(key)?.goal?.goal_id,
@@ -9320,7 +9597,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const evaluation = this.evaluateCompletionContract(contract, facts)
     if (!evaluation.satisfied) {
       const gap = freshCheckpointReadGap(contract, facts, this.currentContractContext())
-      return gap ? skip(gap.reason, { requirement_id: gap.requirement_id }) : { closed: false }
+      return gap ? skip(gap.reason, { requirement_id: gap.requirement_id }) : skip('checkpoint_native_requirements_unsatisfied', { results: evaluation.results })
     }
     if (identityChanged()) return skip('settlement_identity_changed')
     if (this.currentPendingAmendment()) return skip('pending_amendment')
@@ -9465,6 +9742,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   async completionFactsForContract(contract, verification, operationNames, { committedIdentity = false } = {}) {
     const facts = {}
+    const progressOwner = this.captureCheckpointOwner()
     const normalized = sanitizeStepCompletionContract(contract, this.currentContractContext())
     const planning = this.memory.planningState?.(this.activePlanKey())
     const receiptPlan = getActivePlanningPlan(planning)
@@ -9596,6 +9874,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           }
         }
       }
+    }
+    if (receiptPlan?.steps?.[receiptPlan.active_step_index]?.completion_contract
+      && completionContractSignature(normalized) === completionContractSignature(receiptPlan.steps[receiptPlan.active_step_index].completion_contract)
+      && getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey())) === receiptPlan) {
+      await this.assertCheckpointOwnerCurrent(progressOwner)
+      this.memory.creditNativeProgress?.(this.activePlanKey(), receiptPlan, receiptPlan.steps[receiptPlan.active_step_index], facts)
     }
     return facts
   }
@@ -9992,7 +10276,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const board = planState?.task_board
     const activeIndex = Number.isSafeInteger(board?.active_index) ? board.active_index : undefined
     const skills = this.loadedSkillContext instanceof Map
-      ? [...this.loadedSkillContext.values()].slice(-3).map(skill => ({
+      ? [...this.loadedSkillContext.values()].filter(skill => compactLoadedSkill(skill, skill?.id)).slice(-3).map(skill => ({
           id: typeof skill?.id === 'string' ? cleanMemoryText(skill.id, 80) : undefined,
           name: typeof skill?.name === 'string' ? cleanMemoryText(skill.name, 160) : undefined,
           revision: Number.isSafeInteger(skill?.revision) ? skill.revision : undefined,
@@ -10439,23 +10723,41 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const owner = { ...this.captureCheckpointOwner(), intakeToken: this.requestAdmissionOwner, amendment: this.pendingInteractionAmendment }
     const intake = this.requestAdmissionOwner
     const amendment = this.pendingInteractionAmendment
+    let factoryFence
     const current = () => {
       this.assertCheckpointOwnerIdentity(owner)
       this.assertModelRecoveryAllowed()
       if (this.requestAdmissionOwner !== intake || this.pendingInteractionAmendment !== amendment) throw new AgentLoopError('Prepared operation cancelled or superseded')
+      if (factoryFence && (this.memory.factoryWorldBinding().generation !== factoryFence.generation
+        || this.memory.getFactoryRegistry().revision !== factoryFence.revision)) throw new AgentLoopError('Factory assignment changed during operation preparation')
     }
     const planning = this.memory.planningState?.(key)
     const plan = planning ? getActivePlanningPlan(planning) : undefined
     const step = plan?.steps?.[plan.active_step_index]
+    await atFactoryCellBoundary(this, 'pre_send', () => reconcileFactoryCellUse(this, { phase: 'pre_send', operations }))
+    const factoryScope = await atFactoryCellBoundary(this, 'pre_send', () => factoryPlacementAdmissionScope(this, operations, preflight))
+    if (this.memory.factoryRegistryStatus?.().status === 'initialized') factoryFence = { generation: this.memory.factoryWorldBinding().generation, revision: this.memory.getFactoryRegistry().revision }
+    const physicalRevision = this.memory.factoryLifecycleRevision?.() ?? 0
+    current()
+    if (factoryScope && (factoryScope.actor_id !== before?.actor_id || factoryScope.actor_epoch !== before?.epoch)) {
+      throw new AgentLoopError('Factory placement admission cancelled or superseded by actor change')
+    }
     const baseline = batchWatermark(await this.readTaskStatusRaw()) ?? null
     current()
+    if ((this.memory.factoryLifecycleRevision?.() ?? 0) !== physicalRevision) throw new AgentLoopError('Factory physical assignment changed during operation preparation')
+    const lifecycle = factoryLifecycleOperation(this, operations)
+    if (lifecycle) {
+      await validateFactoryLifecycleOperation(this, operations[0])
+      current()
+      if (this.memory.factoryLifecycleRevision() !== physicalRevision) throw new AgentLoopError('Factory physical assignment changed during operation preparation')
+    }
     const record = this.memory.recordPendingOperation(key, buildPendingOperation({
       requestId: this.traceRequest?.id,
       operationKey: `${this.traceRequest?.id ?? 'request'}/batch_${(planning?.operation_ledger?.sequence ?? 0) + 1}`,
       ordinal: (planning?.operation_ledger?.sequence ?? 0) + 1,
       preflight,
       protocolVersion: 2,
-      surfaceIndex: operations.every(operation => ['gather_resource', 'mine_resource_at'].includes(operation.name)) ? before?.surface_index : this.gatherAdmission?.surfaceIndex ?? this.entityRefreshAdmission?.owner.surfaceIndex,
+      surfaceIndex: factoryScope?.surface_index ?? (lifecycle || operations.every(operation => ['gather_resource', 'mine_resource_at'].includes(operation.name)) ? before?.surface_index : this.stockDependencyAdmission?.claim.surface_index ?? this.gatherAdmission?.surfaceIndex ?? this.entityRefreshAdmission?.owner.surfaceIndex),
       operations,
       goalId: planning?.goal?.goal_id,
       planId: plan?.plan_id,
@@ -10474,18 +10776,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       throw new AgentLoopError('Operation ledger full or record refused; no operation sent')
     }
     try {
+      bindStockDependencyAdmission(this, record)
+      await bindTemporaryFactoryPlacement(this, record)
+      await claimFactoryLifecycleOperation(this, lifecycle, record)
       await this.persistState({ strict: true })
       current()
     } catch (error) {
       await this.settleUnsentOperation(record, key, 'prepared_operation_cancelled_before_return', owner)
       throw error
     }
+    if (operations.some(operation => operation.name !== 'wait')) this.factoryDeliveryMutationSeq = (this.factoryDeliveryMutationSeq ?? 0) + 1
     return record
   }
 
   // A prepared attempt the game provably never saw (rejected before transport, or the game refused it before recording
   // anything): settle it as not happened so it leaves no hold.
   async settleUnsentOperation(pending, ownerKey, reason, expectedOwner) {
+    await retainUnsentFactoryLifecycleOperation(this, pending, reason, expectedOwner)
     const current = () => !expectedOwner || (this.checkpointOwnerCurrent(expectedOwner)
       && this.requestAdmissionOwner === expectedOwner.intakeToken && this.pendingInteractionAmendment === expectedOwner.amendment)
     const emit = (event, data) => current() ? this.traceEvent(event, data, { requestId: pending.request_id })
@@ -10504,6 +10811,46 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     await this.persistState()
     await emit('operation.not_sent', { request_id: pending.request_id, operation_key: pending.operation_key, reason })
+  }
+
+  async settleFactoryLifecycleResidual(pending) {
+    const owner = this.captureCheckpointOwner(); const key = this.activePlanKey()
+    if (!this.stateFile) throw new AgentLoopError('Factory lifecycle requires durable persistence')
+    const held = this.memory.pendingOperations(key).find(row => row.operation_key === pending.operation_key)
+    if (!held || held.signature !== pending.signature || held.attempt_id !== pending.attempt_id) throw new AgentLoopError('Factory lifecycle pending operation changed')
+    const status = JSON.parse(await this.readTaskStatusRaw()); await this.assertCheckpointOwnerCurrent(owner)
+    const result = factoryLifecycleRuntime(this, { pending }).settle(status, pending)
+    const tx = this.memory.factoryLifecycleTransactions().find(row => row.claims.at(-1)?.binding.operation_key === pending.operation_key)
+    if (!result.matched || result.hold || tx?.claims.at(-1)?.state !== 'residual_reconciled'
+      || status.task_state !== 'idle' || status.queue_empty !== true || status.queue_length !== 0 || status.active_batch) throw new AgentLoopError('Factory lifecycle residual reconciliation not durable')
+    this.memory.updatePendingOperation(key, { state: PENDING_STATE.ADMITTED, effect: EFFECT.PARTIAL_KNOWN,
+      verdict: RECONCILE_VERDICT.ADMITTED_PARTIAL, reason: 'factory_lifecycle_residual_reconciled', reconciled_at: Date.now() }, pending.operation_key)
+    await this.persistState({ strict: true }); await this.assertCheckpointOwnerCurrent(owner)
+    if (!this.memory.clearPendingOperation(key, { operationKey: pending.operation_key })) throw new AgentLoopError('Factory lifecycle residual settlement refused')
+    await this.persistState({ strict: true }); await this.assertCheckpointOwnerCurrent(owner)
+    await this.traceEvent('factory_lifecycle.residual_settled', { operation_key: pending.operation_key, transaction_id: tx.transaction_id, effect: EFFECT.PARTIAL_KNOWN })
+  }
+
+  async executeFactoryLifecycleOperation(operation) {
+    const owner = this.captureCheckpointOwner()
+    if (!factoryLifecycleOperation(this, [operation])) throw new AgentLoopError('Factory lifecycle operation not authorized')
+    await this.assertCheckpointOwnerCurrent(owner)
+    const previous = this.productionAdmission
+    this.productionAdmission = owner
+    try {
+      const result = await this.commitPlan({ chatMessage: '', stepId: owner.stepId, plan: [], currentStep: 0, operations: [operation] })
+      await this.assertCheckpointOwnerCurrent(owner)
+      for (let poll = 0; poll < 120; poll++) {
+        const raw = await this.readTaskStatusRaw(); await this.assertCheckpointOwnerCurrent(owner)
+        const status = typeof raw === 'string' ? JSON.parse(raw) : raw
+        if (status.task_state === 'idle' && status.queue_empty === true && status.queue_length === 0 && !status.active_batch) {
+          await this.taskStatusReceipt(); await this.assertCheckpointOwnerCurrent(owner)
+          return result
+        }
+        await observationDelay(250); await this.assertCheckpointOwnerCurrent(owner)
+      }
+      throw new AgentLoopError('Factory lifecycle native operation remains pending after bounded wait')
+    } finally { if (this.productionAdmission === owner) this.productionAdmission = previous }
   }
 
   // A legacy (pre-journal) record that neither exact nor baseline evidence can settle must not hold silently: raise one
@@ -10670,6 +11017,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (!pending) return
       const watermark = batchWatermark(rawStatus)
       if (!watermark || watermark.idle !== true || watermark.queue_length !== 0) return
+      const lifecycle = await settleFactoryLifecycleOperation(this, typeof rawStatus === 'string' ? JSON.parse(rawStatus) : rawStatus, pending, receiptOwner)
+      if (lifecycle.hold) return
       let actor = capturedActor ?? (this.epoch ? { actor_id: this.epoch.actor_id, epoch: this.epoch.epoch } : undefined)
       let result = reconcilePendingOperation(pending, { status: rawStatus, actor })
       if (result.verdict === RECONCILE_VERDICT.ADMITTED_PARTIAL && !capturedActor) {
@@ -10820,7 +11169,52 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return result
   }
 
+  // Trusted host API. No classifier, planner, Jev or world operation is called.
+  // The isolated finite contract is installed before the host arms its native
+  // baseline; starting inference is a separate, explicit call below.
+  async acceptOwnerGoal(raw) {
+    const spec = sanitizeOwnerGoal(raw)
+    if (this.active || this.ownerGoalAdmissionPending || this.requestAdmissionOwner || this.ownerGoalIntake?.started) throw new AgentLoopError('owner_goal_intake_busy')
+    this.ownerGoalAdmissionPending = true
+    const generation = this.generation; const lineage = this.agentContext.lineageSequence
+    const current = () => {
+      if (this.generation !== generation || this.agentContext.lineageSequence !== lineage || this.requestAdmissionOwner) throw new AgentLoopError('owner_goal_intake_superseded')
+    }
+    try {
+      await this.loadPersistentState(); current()
+      const epoch = await super.captureEpoch(); current()
+      const status = await this.readInteractionTaskStatus(); current()
+      if (status?.status_error || status?.task_state !== 'idle' || status.queue_length !== 0) throw new AgentLoopError('owner_goal_requires_native_idle')
+      const memoryKey = this.activePlanKey()
+      const prior = this.memory.planningState?.(memoryKey)?.goal
+      if (prior && !ownerGoalRecordMatches(prior, spec)) throw new AgentLoopError('owner_goal_requires_empty_or_same_intake')
+      if (!prior) {
+        const admitted = this.memory.admitPlanningGoal(memoryKey, { owner: spec.sender, objective: spec.text, goalId: spec.goalId, now: Date.now() })
+        if (admitted?.goal?.goal_id !== spec.goalId) throw new AgentLoopError('owner_goal_admission_refused')
+        this.memory.defineGoal(memoryKey, spec.definition, { source: 'user', now: Date.now() })
+      }
+      if (!ownerGoalRecordMatches(this.memory.planningState(memoryKey)?.goal, spec)) throw new AgentLoopError('owner_goal_definition_refused')
+      await this.grantPlayerObjective(memoryKey, this.memory.planningState(memoryKey).goal, spec.text); current()
+      await this.persistState({ strict: true }); current()
+      const after = await super.captureEpoch(); current()
+      if (actorChanged(after, epoch) || after.session !== epoch.session) throw new AgentLoopError('owner_goal_actor_changed')
+      this.ownerGoalIntake = { spec, memoryKey, epoch: after, started: false }
+      return { ok: true, goalId: spec.goalId, acceptanceKey: spec.acceptanceKey, definition: structuredClone(spec.definition), inferenceStarted: false }
+    }
+    finally { this.ownerGoalAdmissionPending = false }
+  }
+
+  async runOwnerGoal({ goalId } = {}) {
+    const intake = this.ownerGoalIntake
+    if (!intake || intake.started || goalId !== intake.spec.goalId || !ownerGoalRecordMatches(this.memory.planningState(intake.memoryKey)?.goal, intake.spec)) throw new AgentLoopError('owner_goal_not_ready')
+    const current = await super.captureEpoch()
+    if (actorChanged(current, intake.epoch) || current.session !== intake.epoch.session) throw new AgentLoopError('owner_goal_actor_changed')
+    intake.started = true // No implicit retries or renewed admission allowances.
+    return this.request(intake.spec.text, { sender: intake.spec.sender, ownerGoal: intake.spec })
+  }
+
   async request(text, options = {}) {
+    if (this.ownerGoalAdmissionPending || (this.ownerGoalIntake && !this.ownerGoalIntake.started)) throw new AgentLoopError('owner_goal_awaiting_explicit_start')
     const owner = { id: `intake_${randomUUID()}`, agent: this, npcId: this.npcId, actor: this.epoch ? { ...this.epoch } : null, generation: this.generation, lineage: this.agentContext.lineageSequence, phase: 'intake', expectedReset: false }
     this.requestAdmissionOwner = owner
     return requestAdmissionScope.run(owner, async () => {
@@ -10853,6 +11247,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let planBefore = this.memory.currentPlan?.(memoryKey)
     const taskStatus = await this.waitForRequestAdmission(this.readInteractionTaskStatus())
     const healthyRuntime = interactionRuntimeHealthy(taskStatus)
+    const ownerGoal = options.ownerGoal
+    if (ownerGoal && (ownerGoal !== this.ownerGoalIntake?.spec || !this.ownerGoalIntake.started || text !== ownerGoal.text
+      || sender !== ownerGoal.sender || !ownerGoalRecordMatches(this.memory.planningState(memoryKey)?.goal, ownerGoal)
+      || taskStatus?.status_error || taskStatus?.task_state !== 'idle' || taskStatus.queue_length !== 0)) throw new AgentLoopError('owner_goal_intake_mismatch')
 
     // Upgrade safety: older builds could persist a provider/control-plane
     // failure as durable WORLD_BLOCKED. That is not Factorio truth. Demote it
@@ -10871,7 +11269,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     let routed
-    if (!this.interactionProvider && !this.interactionDecisionProvider) {
+    if (ownerGoal) {
+      routed = { route: { intent: 'new_goal', queue_conflict: false, reply: '' }, epoch: undefined,
+        router_bypassed: true, classifier_skipped: 'explicit_typed_owner_goal' }
+    }
+    else if (!this.interactionProvider && !this.interactionDecisionProvider) {
       routed = {
         route: { intent: planBefore ? 'continue_current' : 'new_goal', queue_conflict: false, reply: '' },
         epoch: undefined,
@@ -10901,7 +11303,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
 
     // A bare Resume/continue on the goal a restart paused before its first plan re-drives that goal.
-    const redriveGoal = isBareContinuation(text) ? this.redrivableGoalWithoutPlan(memoryKey) : undefined
+    const redriveGoal = isBareContinuation(text) ? this.redrivableGoalWithoutPlan(memoryKey, { startupRecovery: options.startupRecovery === true }) : undefined
     if (redriveGoal) routed.route = { ...routed.route, intent: 'continue_current', queue_conflict: false, reply: '' }
     // An intake retry (supervisor.mjs) re-sends the objective whose first planner call failed on transport: the same intent it was
     // received under, whatever the router would now say about the text.
@@ -11055,7 +11457,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       && planBefore?.provider_recovery?.kind === 'budget_handoff'
       && planBefore?.provider_recovery?.phase === 'planner_pending'
       && !healthyRuntime
-    const plannerShape = !resumeProviderBudgetHandoff
+    const plannerShape = !ownerGoal && !resumeProviderBudgetHandoff
       && ['new_goal', 'amend_current', 'continue_current'].includes(intent)
       ? await this.waitForRequestAdmission(this.requestInteractionPlannerShape(text, sender, taskStatus, planBefore, intent, routed.epoch))
       : undefined
@@ -11217,12 +11619,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         const admitted = this.memory.admitPlanningGoal(memoryKey, {
           owner: sender,
           objective: text,
+          ...(ownerGoal ? { goalId: ownerGoal.goalId } : {}),
           now: Date.now(),
         })
+        if (ownerGoal && !ownerGoalRecordMatches(admitted?.goal, ownerGoal)) throw new AgentLoopError('owner_goal_definition_changed')
         // MW5: the player's own objective carries a grant so a replacement can be authorized later. Only a chat-origin
         // new_goal reaches this point; recovery runs, amendments and chat-only intents never mint one.
         if (admitted?.goal) await this.waitForRequestAdmission(this.grantPlayerObjective(memoryKey, admitted.goal, text))
-        if (admitted?.goal && this.steeringDecisionProvider
+        if (!ownerGoal && admitted?.goal && this.steeringDecisionProvider
           && typeof this.memory.evaluateSteeringAtBoundary === 'function') {
           const recommendation = await this.waitForRequestAdmission(this.requestBoundarySteeringRecommendation(memoryKey, {
             boundary: STEERING_BOUNDARY.GOAL_ADMISSION,
@@ -11257,7 +11661,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
 
       await this.assertRequestAdmissionActor()
-      await this.waitForRequestAdmission(ensureSkillOffers(this, { memoryKey, intent, text })) // 2.8 hook: skill-offers.mjs
+      await this.waitForRequestAdmission(ensureSkillOffers(this, { memoryKey, intent, text, deterministicOnly: Boolean(ownerGoal) })) // 2.8 hook: skill-offers.mjs
       await ensureGoalRequirements(this, { memoryKey, intent })
       this.assertRequestAdmission() // goal-requirements.mjs: reset on a new goal, re-read on a revision
       this.chatRequestPending = true
@@ -11346,18 +11750,64 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
 
   // Resume of that pause: the goal is re-driven from its own objective (no plan exists to
   // continue, and a bare "continue" must never become the objective of a new goal).
-  redrivableGoalWithoutPlan(key) {
+  redrivableGoalWithoutPlan(key, { startupRecovery = false } = {}) {
     const planning = this.memory.planningState?.(key)
     if (!planning?.goal || planning.goal.status !== GOAL_STATUS.ACTIVE || getActivePlanningPlan(planning)) return undefined
     if (this.memory.currentPlan?.(key)) return undefined
+    if (startupRecovery && planning.run?.paused !== true && this.memory.currentGoalGrant?.(key)
+      && !(planning.authorization?.questions ?? []).some(question => question.status === 'pending')
+      && !(planning.operation_ledger?.records?.length > 0)) return planning.goal
     if (planning.run?.paused !== true || planning.run.pause_reason !== RESTART_BEFORE_FIRST_PLAN_PAUSE) return undefined
     return planning.goal
   }
 
   // `pauseInfo.pause_class` is the pause's declared class (pause-class.mjs). Every caller declares one; a missing class is recorded as
   // unclassified, never auto-resumes, and the supervisor reports it (recovery.pause_unclassified).
+  async pauseCompletedGoalControl(expected, actor, ownsStop, readNativeActor) {
+    const key = this.activePlanKey()
+    let ownedControl = expected
+    const current = () => ownsStop() && this.activePlanKey() === key
+      && JSON.stringify(this.memory.completedGoalControl?.(key)) === JSON.stringify(ownedControl)
+    const fresh = async () => {
+      if (!current()) throw new AgentLoopError('Completed-goal stop superseded')
+      const native = await readNativeActor()
+      if (!current() || native?.actor_id !== expected.actor_id || native.epoch !== expected.actor_epoch || native.session !== expected.session_id) {
+        throw new AgentLoopError('Completed-goal stop native identity changed')
+      }
+    }
+    await fresh()
+    const receipt = this.memory.pauseCompletedGoalControl?.(key, expected, actor)
+    if (!receipt) throw new AgentLoopError('Completed-goal stop actor or terminal receipt changed')
+    ownedControl = receipt
+    await this.persistState({ strict: true })
+    if (!current()) throw new AgentLoopError('Completed-goal stop superseded during persistence')
+    await fresh()
+    await this.traceEvent('goal.paused', { goal_id: receipt.goal_id, goal_status: 'completed', control_only: true,
+      cause: 'user_stop', pause_class: PAUSE_CLASS.OPERATOR, actor_id: receipt.actor_id, actor_epoch: receipt.actor_epoch,
+      session_id: receipt.session_id, completed_at: receipt.completed_at, paused_at: receipt.operator_pause.at,
+      authority: 'durable_completed_goal_control' })
+    if (!current()) throw new AgentLoopError('Completed-goal stop superseded during diagnostic')
+    return undefined // No executable Task Board is revived or marked paused.
+  }
+
   async pausePersistentPlan(reason = 'user_stop', pauseInfo = {}, expectedOwner) {
     const guardPause = pauseInfo.pause_class === PAUSE_CLASS.GUARD
+    // A projection may return a fresh object for the same pending amendment.
+    // Compare its stable body, which also detects in-place text/id changes.
+    const amendmentIdentity = () => JSON.stringify(this.currentPendingAmendment(), (_key, value) =>
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right))) : value)
+    const amendment = amendmentIdentity()
+    const active = this.active
+    const actorIdentity = () => JSON.stringify([this.epoch?.session, this.epoch?.actor_id, this.epoch?.epoch, this.epoch?.surface_index])
+    const actor = actorIdentity()
+    const assertGuardPauseCurrent = () => {
+      if (guardPause && (amendmentIdentity() !== amendment || this.active !== active || actorIdentity() !== actor)) {
+        const stale = new AgentLoopError('Guard pause cancelled or superseded by amendment or actor')
+        stale.code = STALE_REPLY_ERROR_CODE
+        throw stale
+      }
+    }
     const checkpointOwner = expectedOwner ?? (guardPause ? this.captureCheckpointOwner() : undefined)
     const callerAdmission = checkpointOwner?.admissionOwner
       ?? (requestAdmissionScope.getStore()?.agent === this && requestAdmissionScope.getStore()?.phase === 'turn' ? requestAdmissionScope.getStore() : null)
@@ -11370,7 +11820,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (expectedOwner && !guardPause && expectedOwner.admissionOwner !== admission) {
       throw new AgentLoopError('Request admission cancelled or superseded before pause')
     }
+    const loadingOwner = { generation: this.generation, trace: this.traceRequest, key: this.activePlanKey(),
+      goal: this.memory.planningState?.(this.activePlanKey())?.goal?.goal_id, loaded: this.stateLoaded }
     await this.loadPersistentState()
+    assertGuardPauseCurrent()
+    if (this.generation !== loadingOwner.generation || this.traceRequest !== loadingOwner.trace || actorIdentity() !== actor
+      || this.activePlanKey() !== loadingOwner.key || (loadingOwner.loaded
+        && this.memory.planningState?.(loadingOwner.key)?.goal?.goal_id !== loadingOwner.goal)) {
+      throw new AgentLoopError('Request cancelled or superseded during pause load')
+    }
     if (this.requestAdmissionOwner !== admission) {
       throw new AgentLoopError('Request admission cancelled or superseded during pause')
     }
@@ -11381,28 +11839,57 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // Pausing can reconcile a torn legacy/reducer projection. Fence the exact
     // result of that synchronous owned mutation across the persistence await.
     const pausedOwner = checkpointOwner ? this.captureCheckpointOwner() : undefined
-    await this.persistState()
-    if (pausedOwner) this.assertCheckpointOwnerIdentity(pausedOwner)
-    if (this.requestAdmissionOwner !== (preserveAdmission ? admission : null)) {
-      throw new AgentLoopError('Request admission cancelled or superseded during pause')
+    const stopOwner = { generation: this.generation, trace: this.traceRequest, lineage: this.agentContext.lineageSequence,
+      goal: this.memory.planningState?.(key)?.goal?.goal_id, actor: actorIdentity(), amendment: amendmentIdentity(),
+      actorId: this.epoch?.actor_id, actorEpoch: this.epoch?.epoch, sessionId: this.epoch?.session }
+    const ownsPause = () => this.requestAdmissionOwner === (preserveAdmission ? admission : null)
+      && this.generation === stopOwner.generation && this.traceRequest === stopOwner.trace
+      && this.agentContext.lineageSequence === stopOwner.lineage && this.activePlanKey() === key
+      && this.memory.planningState?.(key)?.goal?.goal_id === stopOwner.goal
+      && actorIdentity() === stopOwner.actor && amendmentIdentity() === stopOwner.amendment
+    try {
+      try { await this.persistState({ strict: true }) }
+      catch (error) {
+        this.log(`[memory] control pause save failed: ${error?.code ?? 'canonical_persistence_failed'}`)
+        // Pinned diagnostic only: do not attribute a late failed save to a new
+        // request or enter its usage/recovery machinery through traceEvent.
+        try {
+          await this.behaviorTrace?.emit({ schema: 1, ts: new Date().toISOString(), event: 'goal.pause_save_failed',
+            request_id: stopOwner.trace?.id, seq: stopOwner.trace ? ++stopOwner.trace.seq : 0,
+            actor_id: stopOwner.actorId, epoch: stopOwner.actorEpoch, session_id: stopOwner.sessionId,
+            data: { memory_key: key, goal_id: stopOwner.goal, reason, code: error?.code ?? 'canonical_persistence_failed',
+              attempts: error?.attempts, durability: 'unconfirmed' } })
+        } catch { /* The original storage error remains the visible failure. */ }
+        throw error
+      }
+      assertGuardPauseCurrent()
+      if (pausedOwner) this.assertCheckpointOwnerIdentity(pausedOwner)
+      if (!ownsPause()) {
+        throw new AgentLoopError('Request admission cancelled or superseded during pause')
+      }
+      if (!this.traceRequest) {
+        const paused = this.goalPausedTrace('pause_persistent_plan')
+        if (paused) await this.traceEvent('goal.paused', paused, { requestId: paused.request_id })
+      }
+      // The diagnostic is an awaited writer too: no late pause may abort/reset a
+      // request or checkpoint that arrived while its final row was queued.
+      assertGuardPauseCurrent()
+      if (pausedOwner) this.assertCheckpointOwnerIdentity(pausedOwner)
+      if (!ownsPause()) {
+        throw new AgentLoopError('Request admission cancelled or superseded during pause diagnostic')
+      }
+      return state
     }
-    if (!this.traceRequest) {
-      const paused = this.goalPausedTrace('pause_persistent_plan')
-      if (paused) await this.traceEvent('goal.paused', paused, { requestId: paused.request_id })
+    finally {
+      // A failed durable save still stops this owner; it must not reset a new
+      // request, actor, amendment or goal that arrived during the await.
+      if (ownsPause()) {
+        abortSkillChoice(this, reason)
+        this.abortStepContractCalls()
+        if (preserveAdmission) this.reset({ preserveAdmission: admission })
+        else super.cancel()
+      }
     }
-    // The diagnostic is an awaited writer too: no late pause may abort/reset a
-    // request or checkpoint that arrived while its final row was queued.
-    if (pausedOwner) this.assertCheckpointOwnerIdentity(pausedOwner)
-    if (this.requestAdmissionOwner !== (preserveAdmission ? admission : null)) {
-      throw new AgentLoopError('Request admission cancelled or superseded during pause diagnostic')
-    }
-    abortSkillChoice(this, reason)
-    this.abortStepContractCalls()
-    // Base cancel is exactly reset(). Preserve/re-anchor an unrelated intake
-    // across this physical reset, rather than lending it to the guard as owner.
-    if (preserveAdmission) this.reset({ preserveAdmission: admission })
-    else super.cancel()
-    return state
   }
 
   async finalizeCompletedTaskContext(result) {
@@ -11527,6 +12014,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // terms (and bring a Roadmap Shelf when it is long-horizon). One corrective
   // retry is allowed; a second failure stops and asks the player.
   enforceGoalDefinition(plan) {
+    const ownerDefinition = this.memory.goalDefinition?.(this.activePlanKey())
+    if (ownerDefinition?.source === 'user') {
+      if (plan.goalDefinition && !sameOwnerGoalConditions(ownerDefinition, plan.goalDefinition)) throw this.goalDefinitionError('owner_goal_definition_immutable', 'The owner supplied the exact immutable completion condition. Preserve it; omit submitPlan.goal or repeat the same predicates.')
+      return
+    }
     if (this.goalDefinitionPolicy !== 'required') return
     if (!Array.isArray(plan.plan) || plan.plan.length === 0) return
     const key = this.activePlanKey()
@@ -11754,7 +12246,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     fence.actor = await this.goalEvaluationActor(definition)
     if (!this.goalEvaluationMatches(fence)) await this.assertGoalEvaluationCurrent(fence)
-    const evaluation = await evaluateGoalDefinition(definition, async command => {
+    const evaluation = await evaluateGoalDefinition({ ...definition, acceptance_key: fence.goalId, acceptance_bindings: this.memory.planningState?.(key)?.goal?.acceptance_bindings }, async command => {
       await this.assertGoalEvaluationCurrent(fence)
       const result = await this.rcon.command(command)
       await this.assertGoalEvaluationCurrent(fence)
@@ -11793,11 +12285,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const fence = evaluation._sglunaGoalFence
     if (!fence || !evaluation.satisfied) throw new AgentLoopError('Goal satisfaction requires current authoritative evaluation')
     await this.assertGoalEvaluationCurrent(fence)
+    await ensureFactoryCellBeforeGoalCompletion(this, this.captureCheckpointOwner())
+    await this.assertGoalEvaluationCurrent(fence)
     this.memory.recordGoalSatisfaction(fence.key, {
       source: 'runtime',
       evidenceRefs: evaluation.results.map(result => `goal_condition/${result.id}/${result.current ?? 'true'}`),
       rationale: 'goal_definition_conditions_satisfied',
     })
+    this.memory.recordCompletedGoalControl?.(fence.key, fence.actor)
     await this.persistState()
     await this.assertGoalEvaluationCurrent(fence)
   }
@@ -11815,6 +12310,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     const unverifiable = evaluation.results.filter(result => /^(?:unknown_|invalid_)/.test(result.error ?? ''))
     if (unverifiable.length > 0) return this.pauseForUnverifiableGoal(unverifiable)
     if (!evaluation.satisfied) return undefined
+    const enrollmentOwner = this.captureCheckpointOwner()
+    try { await ensureFactoryCellBeforeGoalCompletion(this, enrollmentOwner) }
+    catch (error) {
+      this.assertCheckpointOwnerIdentity(enrollmentOwner)
+      await this.assertGoalEvaluationCurrent(evaluation._sglunaGoalFence)
+      const reason = error.code ?? 'factory_enrollment_failed'
+      await this.traceEvent('factory_cell.goal_completion_refused', { request_id: enrollmentOwner.requestTrace?.id,
+        goal_id: enrollmentOwner.goalId, plan_id: enrollmentOwner.planId, step_id: enrollmentOwner.stepId,
+        reason, receipt_ids: this.memory.factoryGoalEnrollmentStatus(key).receipt_ids, original_goal_satisfied: true, disposition: 'protect_built_committed_intent_before_goal_close' })
+      this.assertCheckpointOwnerIdentity(enrollmentOwner)
+      return this.pauseForStepContract({ reason, owner: enrollmentOwner })
+    }
+    await this.assertGoalEvaluationCurrent(evaluation._sglunaGoalFence)
     // Close the legacy plan before recording satisfaction: recording first
     // would let the plan-close path re-admit the goal as a new active one.
     const reduced = this.memory.applyOutcomeAuthority?.(key, {
@@ -11978,6 +12486,21 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       resume: 'Resume or say continue',
       ...extra,
     }
+  }
+
+  // Native factory replies must survive cancellation as evidence belonging to
+  // the original request. This narrow capture path grants no gameplay authority,
+  // updates no live usage ledger and never attributes a late reply to a new turn.
+  captureFactoryObservationTrace(owner, event, data) {
+    if (!['factory_cell.native_evidence', 'factory_cell.tool_refused', 'factory_cell.enrollment_recovery_failed'].includes(event)) throw new AgentLoopError('Unsupported factory evidence event')
+    const record = { schema: 1, ts: new Date().toISOString(), event, request_id: owner.requestId,
+      seq: owner.request?.id === owner.requestId && Number.isSafeInteger(owner.request.seq) ? ++owner.request.seq : 0,
+      turn: owner.turn, actor_id: owner.actorId, epoch: owner.actorEpoch, session_id: owner.sessionId, data }
+    if (this.onActivity) {
+      try { this.onActivity(event, data) }
+      catch (error) { this.log(`[trace] activity listener failed: ${error instanceof Error ? error.message : String(error)}`) }
+    }
+    return this.behaviorTrace ? this.behaviorTrace.emit(record) : Promise.resolve()
   }
 
   traceEvent(event, data = {}, { requestId } = {}) {
@@ -12287,6 +12810,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           ...(intakeFailure ? { intake_retry_candidate: true } : {}),
           usage: requestTrace.usage,
           failure_snapshot: this.failureSnapshot('runtime', message, proofFailure),
+          ...(error instanceof FactoryCellBoundaryError ? { failure_code: error.failure_code, pause_class: error.pause_class, factory_boundary: error.detail } : {}),
         }, { requestId })
         if (ownsFailure()) this.traceRequest = null
       }
@@ -12356,6 +12880,29 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return status
   }
 
+  async continueProductionWithCheckpoint() {
+    const owner = this.captureCheckpointOwner()
+    const result = await continueProductionTask(this)
+    if (result !== undefined) return result
+    const complete = [...(this.memory.productionTasks?.values() ?? [])].some(task => task.status === 'complete'
+      && task.owner.goal_id === owner.goalId && task.owner.plan_id === owner.planId
+      && task.owner.plan_version === owner.planVersion && task.owner.step_id === owner.stepId)
+    if (!complete || this.currentPendingAmendment()) return undefined
+    await this.assertCheckpointOwnerCurrent(owner)
+    // A delivery-verification wait is not an inventory receipt. The controller's
+    // complete state therefore requests the ordinary fresh checkpoint boundary.
+    const fresh = await this.closeActiveStepOnFreshRead({ previousState: this.memory.currentPlan(owner.key), trigger: 'production_complete' })
+    if (fresh.closed && pruneClosedProductionRecords(this.memory)) await this.persistState({ strict: true })
+    await this.traceEvent('production.checkpoint_rechecked', { goal_id: owner.goalId, plan_id: owner.planId, step_id: owner.stepId,
+      closed: fresh.closed, reason: fresh.reason ?? 'checkpoint_not_satisfied_or_unavailable' })
+    if (fresh.completionDeferred) return fresh.completionDeferred
+    if (fresh.contractPause) return fresh.contractPause
+    await this.assertCheckpointOwnerCurrent(owner, { advanced: fresh.closed === true })
+    if (fresh.paused) return this.pauseForPlanBoardDisagreement(fresh.disagreement)
+    if (fresh.closed) return this.continueAfterFreshStepClose(fresh, { chatMessage: '', plan: [], currentStep: 0, operations: [] }, await this.assertCurrent())
+    return undefined
+  }
+
   async taskStatusReceipt() {
     await this.dropIfStale(this.turnConversation)
     const owner = this.captureCheckpointOwner()
@@ -12364,6 +12911,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.receiptBatchSettlement = undefined
     this.batchInFlight = false
     this.batchInFlightBeforeSend = undefined
+    const factoryPlacementContext = captureFactoryPlacementContext(this.memory, this.activePlanKey(), this.epoch)
     try {
       const raw = String(await this.rcon.command(toolCommand('getTaskStatus', {}))).slice(0, 8_000_000)
       this.assertCheckpointOwnerIdentity(owner)
@@ -12400,6 +12948,36 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           && (basic.tick === cancelled.tick || basic.tick === row.tick))) return false
         return [RECONCILE_VERDICT.ADMITTED_CANCELLED, RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION, RECONCILE_VERDICT.ADMITTED_PARTIAL].includes(result.verdict)
       })
+      // Persist original receipt lineage before settlement can retire the pending
+      // admission. Missing evidence does not change normal operation settlement.
+      let retained
+      try { retained = this.retainFactoryPlacementReceipt(status, factoryPlacementContext) }
+      catch (error) {
+        retained = { status: 'refused', reason: error.code ?? 'factory_placement_store_failed', receipt: error.factoryPlacementReceipt }
+      }
+      if (retained.status !== 'unavailable') {
+        try { await this.persistState({ strict: true }) }
+        catch (error) {
+          // Keep original pending reconciliation authority. Applied native work
+          // is not an unsent/refused operation when metadata persistence fails.
+          this.memory.invalidateFactoryPlacementPersistence()
+          await this.traceEvent('factory_placement.capture_persistence_failed', {
+            native_effect: retained.receipt ? 'completed' : 'see_original_native_receipt',
+            receipt_id: retained.receipt?.receipt_id, placement_request_id: retained.receipt?.request_id,
+            operation_key: retained.receipt?.operation_key, batch_ref: retained.receipt?.batch_ref,
+            goal_id: retained.receipt?.goal_id, plan_id: retained.receipt?.plan_id, step_id: retained.receipt?.step_id,
+          }, { requestId: owner.requestTrace?.id })
+          throw error
+        }
+        this.assertCheckpointOwnerIdentity(owner)
+      }
+      if (status.basic_operation?.last_result?.type === 'placing') {
+        await this.traceEvent('factory_placement.capture', { status: retained.status, reason: retained.reason,
+          receipt_id: retained.receipt?.receipt_id, placement_request_id: retained.receipt?.request_id,
+          operation_key: retained.receipt?.operation_key, batch_ref: retained.receipt?.batch_ref,
+          goal_id: retained.receipt?.goal_id, plan_id: retained.receipt?.plan_id, step_id: retained.receipt?.step_id })
+        this.assertCheckpointOwnerIdentity(owner)
+      }
       await this.settleOutstandingOperation(raw, undefined, { actor: currentActor, receiptOwner: owner })
       this.assertCheckpointOwnerIdentity(owner)
       this.recordPlacementReceipt(raw)
@@ -12860,6 +13438,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     await this.traceEvent('factorio.completed_signal', pendingAmendment ? { pending_amendment: true } : {})
     await this.dropIfStale(this.turnConversation)
     const receipt = await this.taskStatusReceipt()
+    const stockBarrier = await continueStockDependencyBarrier(this)
+    if (stockBarrier !== undefined) return stockBarrier
     const receiptKey = runtimeReceiptKey('completion', receipt.view, '', this.epoch?.epoch)
     if (this.lastHandledRuntimeReceipt.completion === receiptKey) {
       if (this.traceRequest?.usage) this.traceRequest.usage.coalesced_runtime_events++
@@ -12875,6 +13455,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (!pendingAmendment) {
       const audited = await auditExecutorProgress(this)
       if (audited !== undefined) return audited
+      // The finite controller owns its final attributed-delivery wait. A stock
+      // checkpoint becoming true after collection cannot close ahead of it.
+      const production = await this.continueProductionWithCheckpoint()
+      if (production !== undefined) return production
     }
     const stepCompletion = pendingAmendment
       ? { verified: false, reason: 'pending_amendment' }
@@ -12883,15 +13467,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (stepCompletion?.paused) return this.pauseForPlanBoardDisagreement(stepCompletion.disagreement)
     if (stepCompletion?.completionDeferred) return stepCompletion.completionDeferred
     if (stepCompletion?.contractPause) return stepCompletion.contractPause
+    let fresh
     if (!pendingAmendment && !stepCompletion?.verified) {
       const corrected = await recoverContractObligations(this, { trigger: 'native_completion' })
       if (corrected !== undefined) return corrected
       // A return walk proves arrival only. The original completed effects stay
       // in the durable receipt ledger; ordinary fresh settlement must re-evaluate
       // every unchanged checkpoint predicate before granting progress.
-      if (preservationReobservationVerified(this)) {
+      // A wait-only batch that follows a delivery-window decline of this same
+      // step was the window's second frame; it is read once, by the same close.
+      const preserved = preservationReobservationVerified(this)
+      if (preserved || this.deliveryWindowWaitCompleted(receipt)) {
         const recoveryOwner = this.captureCheckpointOwner()
-        const fresh = await this.closeActiveStepOnFreshRead({ previousState: this.memory.currentPlan(this.activePlanKey()), trigger: 'preservation_reobserved' })
+        fresh = await this.closeActiveStepOnFreshRead({ previousState: this.memory.currentPlan(this.activePlanKey()), trigger: preserved ? 'preservation_reobserved' : 'delivery_window_wait' })
         if (fresh.completionDeferred) return fresh.completionDeferred
         if (fresh.contractRecovery) return fresh.contractRecovery
         if (fresh.contractPause) {
@@ -12913,16 +13501,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           { chatMessage: '', plan: [], currentStep: 0, operations: [] }, await this.assertCurrent())
       }
     }
-    if (!pendingAmendment && !stepCompletion?.verified) {
-      const production = await continueProductionTask(this)
-      if (production !== undefined) return production
-    }
-
     // The reason a step did not close used to be trace-only: the model saw a
     // finished batch and nothing about why the step stayed open.
     const stepOpenHint = stepCompletion?.reason === 'semantic_completion_requires_planner'
       ? this.stepStaysOpenHint(stepCompletion.state)
-      : ''
+      : (fresh ?? stepCompletion)?.reason === 'factory_cell_delivery_unverified'
+        ? '[HARNESS] The active step stays open although its checkpoint counts are met: this direct-feed step closes only when two native frames, with no other operation between them, show the supplier delivering into its consumer. Every batch except a wait-only batch restarts that observation, and only its first frame exists now.'
+        : ''
     const completionState = stepCompletion?.state
     // The decision-scoped overrides are saved before the step settles and restored on every exit, as failed() and request() do:
     // a slice close inside settleCompletedStepState can commit the next slice and run its C3 executor decision to the end (Run AJ:
@@ -13044,6 +13629,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     this.reasoningTriggerSource = null
     const cleanError = cleanMemoryText(errorText, 4000)
     const receipt = await this.taskStatusReceipt()
+    const stockBarrier = await continueStockDependencyBarrier(this)
+    if (stockBarrier !== undefined) return stockBarrier
     const prefixSettlement = this.receiptPrefixSettlement
     this.receiptPrefixSettlement = undefined
     const receiptKey = runtimeReceiptKey('failure', receipt.view, cleanError, this.epoch?.epoch)
@@ -13120,7 +13707,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         if (partialRecovery) await this.traceEvent('transfer.partial_recovery', {
           request_id: this.traceRequest?.id, step_id: supplyState?.task_board?.active_step_id,
           operation_key: supplyRecovery.operation_key, attempt: supplyRecovery.attempt,
-          retry_budget: supplyRecovery.retry_budget, reason: 'exact_terminal_target_rejection_same_step',
+          retry_budget: supplyRecovery.retry_budget, refusal_cause: supplyRecovery.refusal_cause, reason: 'exact_terminal_target_rejection_same_step',
         })
         if (targetRecovery) await this.traceEvent('transfer.target_recovery', {
           request_id: this.traceRequest?.id,
@@ -13160,7 +13747,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         })
       }
       const supplyGuidance = partialRecovery
-        ? ` [HARNESS] The exact native transfer receipt accounts for the completed tasks and the target_rejects_item refusal without moving that item. The completed prefix remains applied; this is partial work, not success of the whole batch. Do not replay the original batch or its prefix. Re-observe the actual target and held counts, then choose only the missing effects inside this same committed step. A furnace may finish an in-progress craft after its input is cleared; inspect its output before changing ingredients. The committed plan and checkpoint remain unchanged. Recovery ${supplyRecovery.attempt} of ${supplyRecovery.retry_budget} uses the existing transfer allowance; all other limits remain unchanged.`
+        ? ` [HARNESS] The exact native transfer receipt accounts for the completed tasks and the ${TERMINAL_TRANSFER_REFUSAL_CAUSES.includes(supplyRecovery.refusal_cause) ? supplyRecovery.refusal_cause : 'terminal'} refusal without moving that item. The completed prefix remains applied; this is partial work, not success of the whole batch. Do not replay the original batch or its prefix. Re-observe the actual target and held counts, then choose only the missing effects inside this same committed step. A furnace may finish an in-progress craft after its input is cleared; inspect its output before changing ingredients. The committed plan and checkpoint remain unchanged. Recovery ${supplyRecovery.attempt} of ${supplyRecovery.retry_budget} uses the existing transfer allowance; all other limits remain unchanged.`
         : targetRecovery
         ? ` [HARNESS] The legacy name-based transfer found no ${cleanMemoryText(supplyRecovery.entity_name, 200)} within interaction reach (no_target). This is a bounded local target-reacquisition dependency inside the same committed step, not evidence that a historical machine was destroyed or WORLD_BLOCKED. The plan, step contract and requested result are unchanged. Historical coordinates are travel guidance only: choose travel if appropriate, wait for its receipt, then re-observe the actual spatial target and current inventories before proposing an exact transfer. Do not substitute a same-name machine or use a cached unit number as execution authority. The original batch may have a successful prefix; its uncertainty and duplicate-effect guard remain authoritative. Do not replay that batch or its cancelled tail; propose only effects justified by fresh counts. Recovery ${supplyRecovery.attempt} of ${supplyRecovery.retry_budget} uses the existing transfer recovery allowance; all other limits and authority checks remain unchanged.`
         : supplyRecovery
@@ -13872,10 +14459,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // not block the restage of the current generation (C7 recovery runs right
   // after the supervisor cancelled the old turn).
   async callProvider(current, generation, options) {
+    const held = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    const effortOwner = this.agentContext.role === EXECUTOR_ROLE && [PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(held?.status)
+      ? this.captureCheckpointOwner() : undefined
     this.providerCallsInFlight++
     this.providerCallsByGeneration.set(generation, (this.providerCallsByGeneration.get(generation) ?? 0) + 1)
     try {
-      return await this.callProviderRound(current, generation, options)
+      const message = await this.callProviderRound(current, generation, options)
+      if (!effortOwner || !message || typeof message !== 'object') return message
+      // A provider may reuse its object; each returned decision still owns a
+      // fresh private ticket, while reparsing that same decision cannot recharge.
+      const ownedMessage = providerMessageWith(message, {})
+      this.#providerEffort.set(ownedMessage, { owner: effortOwner, spent: false })
+      return ownedMessage
     }
     finally {
       this.providerCallsInFlight--
@@ -14066,7 +14662,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       await this.traceEvent('skill.context_presented', {
         request_id: this.traceRequest?.id, round, role: this.agentContext.role, discovery_policy: skillDiscoveryPolicy(this),
-        loaded_ids: [...this.loadedSkillContext.keys()], presented_ids: presentedSkills,
+        loaded_ids: [...this.loadedSkillContext.values()].filter(skill => compactLoadedSkill(skill, skill?.id)).map(skill => skill.id), presented_ids: presentedSkills,
         context_chars: skillBlock?.length ?? 0,
       })
     }
@@ -14591,6 +15187,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     let plannerReview
     let productionTask
     let harnessDefaults
+    let starterBaseBindings
+    let factoryReassignment
+    let workingPlanRevision
     let reviewCheckpointIgnored = false
     let baseMessage = message
     if (typeof message?.content === 'string') {
@@ -14599,6 +15198,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       catch {}
       if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
         this.validatePlannerRoleOutput(raw)
+        if (Object.hasOwn(raw, 'workingPlanRevision')) {
+          if (raw.workingPlanRevision !== true || this.agentContext.role !== PLANNER_ROLE) throw this.roleContractError('invalid_working_revision', 'workingPlanRevision:true is planner-only at a harness review boundary.')
+          workingPlanRevision = true
+          const { workingPlanRevision: _revision, ...rest } = raw
+          raw = rest
+          baseMessage = providerMessageWith(message, { content: JSON.stringify(raw) })
+        }
         if (Object.hasOwn(raw, 'productionTask')) {
           try { productionTask = normalizeProductionIntent(raw.productionTask) }
           catch (cause) { throw this.roleContractError('invalid_production_task', cause.message) }
@@ -14606,6 +15212,19 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
             || !raw.stepId || raw.checkpoint || raw.semanticCompletion || raw.plannerReview || raw.observationRequest) {
             throw this.roleContractError('invalid_production_task', 'productionTask requires an executor stepId, empty operations and no completion/review/read request')
           }
+        }
+        if (Object.hasOwn(raw, 'factoryReassignment')) {
+          if (this.agentContext.role !== PLANNER_ROLE || JSON.stringify(raw.factoryReassignment).length > 1000) throw this.roleContractError('factory_reassignment_planner_required', 'Only the planner may request a bounded validated job transition.')
+          factoryReassignment = structuredClone(raw.factoryReassignment)
+          const { factoryReassignment: _reassignment, ...rest } = raw
+          raw = rest; baseMessage = providerMessageWith(message, { content: JSON.stringify(raw) })
+        }
+        if (Object.hasOwn(raw, 'starterBaseBindings')) {
+          if (this.agentContext.role !== PLANNER_ROLE || JSON.stringify(raw.starterBaseBindings).length > 12000) throw this.roleContractError('invalid_starter_bindings', 'Only the planner may bind bounded existing factory identities.')
+          starterBaseBindings = structuredClone(raw.starterBaseBindings)
+          const { starterBaseBindings: _bindings, ...rest } = raw
+          raw = rest
+          baseMessage = providerMessageWith(message, { content: JSON.stringify(raw) })
         }
         if (Object.hasOwn(raw, 'defaults')) {
           if (this.agentContext.role !== EXECUTOR_ROLE) throw this.roleContractError('invalid_defaults', 'defaults are written by the step executor')
@@ -14768,6 +15387,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (plannerReview) plan.plannerReview = plannerReview
     if (productionTask) plan.productionTask = productionTask
     if (harnessDefaults) plan.defaults = harnessDefaults
+    if (factoryReassignment) plan.factoryReassignment = factoryReassignment
+    if (starterBaseBindings) plan.starterBaseBindings = starterBaseBindings
+    if (workingPlanRevision) plan.workingPlanRevision = true
     if (reviewCheckpointIgnored) plan.reviewCheckpointIgnored = true
     if (semanticCompletion) {
       // Refused here, the claim reaches the planner as a correction it can act
@@ -14925,11 +15547,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (!plan) throw error
     }
     if (plan[REFRESHED_ENTITY_PLAN]?.action !== undefined && plan[REFRESHED_ENTITY_PLAN].action !== 'bound') return plan
+    const decision = this.#providerEffort.get(message)
+    if (decision && !decision.spent && !plan.plannerReview && !plan.executorCannotAuthor && this.memory.spendGoalEffort) {
+      await this.assertCheckpointOwnerCurrent(decision.owner)
+      if (!this.memory.spendGoalEffort(this.activePlanKey(), 'executor_decision')) {
+        this.#exhaustedEffortPlans.set(plan, decision.owner)
+        return plan
+      }
+      decision.spent = true
+      await this.persistState({ strict: true })
+      await this.assertCheckpointOwnerCurrent(decision.owner)
+    }
     await this.validatePreflightCorrectionScope(plan)
     await this.validateLocalFluidSearchBlocker(plan)
     // Refused here, an intent the active step cannot admit is an ordinary plan_category correction; refused only in
     // commitPlan, it failed the request (Run AZ lane A: intermediate target). A refusal the harness can answer from the
     // committed step and fresh game facts passes here; commitPlan repairs it again from fresher facts and reports it.
+    plan = await this.normalizeManualBootstrapProduction(plan)
     if (plan.productionTask) await screenProductionTask(this, plan, this.productionRepairOptions(plan))
     const grounding = await groundFirstPlan(this, plan, options)
     if (grounding) {
@@ -15061,6 +15695,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     return checkpointBatchContradiction(plan.checkpoint, plan.operations)
   }
 
+  observationDecisionCost(prepared) { return (isValidatedKnowledgeBatch(prepared) || isValidatedNotebookBatch(prepared) || isValidatedMachineDeliveryBatch(prepared)) ? 0 : super.observationDecisionCost(prepared) }
+
   assertExecutorSkillHandoffTools(calls) {
     if (this.completionProtocolVersion < 3 || this.agentContext.role !== EXECUTOR_ROLE) return
     const refused = [...new Set(calls.map(call => call?.function?.name).filter(name => PLANNER_SKILL_LOOKUP_TOOLS.includes(name)))]
@@ -15081,7 +15717,15 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         ? { ...message, tool_calls: rawCalls.slice(0, MAX_OBSERVATION_TOOL_CALLS_PER_BATCH) }
         : message
       const prepared = super.prepareToolBatch(admittedMessage)
+      const factorySignatures = new Set()
       for (const entry of prepared) {
+        if (isFactoryCellTool(entry.tool?.function?.name)) {
+          if (factorySignatures.has(entry.signature)) throw new AgentLoopError('Duplicate factory observation in one batch')
+          factorySignatures.add(entry.signature)
+          const host = prepareFactoryCellTool(this, entry.tool.function.name, entry.args)
+          Object.defineProperties(entry, { _sglunaExecuteObservation: { value: host.execute }, _sglunaReadFence: { value: host.fence } })
+          this.toolCache.delete(entry.signature)
+        }
         // The command already carries the committed region (observationToolCommand). The entry's args and signature say so too, so
         // the read cache and duplicate detection never treat a committed-region search as the same read as an unscoped one.
         if (entry.tool?.function?.name !== 'getPlacementCandidates') continue
@@ -15209,6 +15853,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // Check again at dispatch: a caller-supplied prepared batch cannot bypass
     // the executor role boundary (including closed/targeted read paths).
     this.assertExecutorSkillHandoffTools([...(message?.tool_calls ?? []), ...prepared.map(entry => entry.tool)])
+    if ([...(message?.tool_calls ?? []), ...prepared.map(entry => entry.tool)].some(tool => isNotebookTool(tool?.function?.name))) {
+      return handleNotebookToolBatch(this, message, prepared)
+    }
+    if ([...(message?.tool_calls ?? []), ...prepared.map(entry => entry.tool)].some(tool => tool?.function?.name === 'bindMachineDelivery')) return handleMachineDeliveryBinding(this, message, prepared)
+    if ([...(message?.tool_calls ?? []), ...prepared.map(entry => entry.tool)].some(tool => isKnowledgeTool(tool?.function?.name))) {
+      return handleKnowledgeToolBatch(this, message, prepared)
+    }
+    const factorySignatures = new Set()
+    for (const entry of prepared) {
+      if (!isFactoryCellTool(entry.tool?.function?.name)) continue
+      if (factorySignatures.has(entry.signature)) throw new AgentLoopError('Duplicate factory observation in one batch')
+      factorySignatures.add(entry.signature)
+      if (entry.command !== null || typeof entry._sglunaExecuteObservation !== 'function' || typeof entry._sglunaReadFence !== 'function') throw new AgentLoopError('Factory observation requires its trusted prepared host executor')
+      entry._sglunaReadFence()
+      this.toolCache.delete(entry.signature)
+    }
     // Result traces can wait on queued file writes. Keep the owner from before any await;
     // never stamp an old native answer with a replacement request's actor or trace state.
     const batchOwner = { generation: this.generation, lineage: this.agentContext.lineageSequence,
@@ -15400,6 +16060,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     const beforeCount = this.messages.length
     const admittedMessage = { ...message, tool_calls: admittedPrepared.map(entry => entry.tool) }
+    for (const entry of admittedPrepared) {
+      if (['findSkills', 'getSkillDetails'].includes(entry.tool.function.name)) {
+        entry._sglunaPrereadOutput = await readCanonicalLibraryTool(entry.tool.function.name, entry.args)
+        assertBatchCurrent()
+      }
+    }
     // The base pushes the assistant tool-call message before its first assertCurrent.
     await this.dropIfStale(this.turnConversation)
     this.compactionDeferred = true
@@ -15410,6 +16076,10 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
     catch (error) {
+      if (admittedPrepared.some(entry => isFactoryCellTool(entry.tool?.function?.name))) {
+        assertBatchCurrent()
+        for (const entry of admittedPrepared) if (isFactoryCellTool(entry.tool?.function?.name)) entry._sglunaReadFence()
+      }
       await this.traceEvent('tool.error', { message: error instanceof Error ? error.message : String(error) })
       throw error
     }
@@ -15459,8 +16129,9 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     for (let index = 0; index < results.length; index++) {
       assertBatchCurrent()
-      const original = String(results[index].content ?? '')
       const toolName = admittedPrepared[index]?.tool?.function?.name
+      if (['findSkills', 'getSkillDetails'].includes(toolName)) results[index].content = sanitizeLibraryToolOutput(toolName, results[index].content, admittedPrepared[index]?.args)
+      const original = String(results[index].content ?? '')
       if (admittedCached[index] !== true && admittedStaticCached[index] !== true) {
         // The base adapter may already have rendered an entity diff in `results`; the cache holds the actual
         // current raw native answer. Supersede from that answer, never from a partial/diff projection.
@@ -15759,6 +16430,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
     }
 
+    const singleton = directFeedSingletonPlacementRefusal(this, operations)
+    if (singleton) {
+      const failure = new AgentLoopError(`Operation preflight rejected operation ${singleton.operation_index + 1} (${singleton.operation}): ${singleton.code}`)
+      failure.preflight = singleton
+      failure.preflightResults = []
+      throw failure
+    }
+
     for (let index = 0; index < operations.length; index++) {
       const command = renderOperationPreflight(operations[index])
       if (!command) {
@@ -15904,6 +16583,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       failure.preflightResults = results.slice()
       throw failure
     }
+    await checkItemPreservationAdmission(this, { operations, preflight: results })
     await checkFluidPreservationEligibility(this, { operations, preflight: results })
     return results
   }
@@ -16056,6 +16736,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   }
 
   async recoverArgumentPreflight(error, plan, _stateResult) {
+    const stockBarrier = await startStockDependencyBarrier(this, { ...plan, stepId: plan.stepId ?? this.captureCheckpointOwner().stepId }, error, { residual: true })
+    if (stockBarrier !== undefined) return stockBarrier
     const owner = this.captureCheckpointOwner()
     const intake = this.requestAdmissionOwner; const amendment = this.currentPendingAmendment(); const trace = this.traceRequest
     let grant
@@ -16286,6 +16968,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // Operations 0..index with the preflight results gathered so far (the failing one carries its target), so a
       // reserved/protected target earlier in the batch refuses first and no recovery budget is spent.
       const collected = Array.isArray(failure.preflightResults) ? failure.preflightResults : []
+      await atFactoryCellBoundary(this, 'admission', () => reconcileFactoryCellUse(this, { phase: 'admission', operations: plan.operations.slice(0, index + 1) }))
       const admission = this.memory.checkOperationAdmission(key, {
         operations: plan.operations.slice(0, index + 1),
         preflight: plan.operations.slice(0, index + 1).map((_, i) => (i === index ? { ok: true, operation: operation.name, target: preflight.target } : (collected[i] ?? { ok: true }))),
@@ -17201,7 +17884,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // the executor may correct them like a parse-time refusal. Its own per-step allowance keeps a restage from renewing it.
   async correctProductionAdmission(plan, error) {
     const requestId = this.traceRequest?.id
-    await this.assertCurrent()
+    const owner = this.captureCheckpointOwner()
+    const intake = this.requestAdmissionOwner; const amendment = this.currentPendingAmendment()
+    const identity = () => {
+      this.assertCheckpointOwnerIdentity(owner)
+      if (amendment || this.requestAdmissionOwner !== intake || this.currentPendingAmendment() !== amendment) {
+        const stale = new AgentLoopError('Production correction cancelled or superseded')
+        stale.code = STALE_REPLY_ERROR_CODE
+        throw stale
+      }
+    }
+    const fence = async () => { await this.assertCheckpointOwnerCurrent(owner); identity() }
+    await fence()
     const committed = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
     const stepId = committed?.steps?.[committed.active_step_index]?.step_id
     const ledger = this.memory.productionAdmissionLedger ??= new Map()
@@ -17211,14 +17905,18 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       reason: error.code, limit: PRODUCTION_ADMISSION_CORRECTION_LIMIT }
     if (used >= PRODUCTION_ADMISSION_CORRECTION_LIMIT) {
       await this.traceEvent('production.admission_exhausted', { ...details, attempts: used }, { requestId })
+      await fence()
       return this.pauseForExecutorCorrection('production_admission_exhausted', stepId,
         `I paused this goal: my step executor kept sending a production task this step cannot admit (${error.code}), so I stopped instead of guessing. ${RESUME_HINT}`)
     }
     ledger.delete(key)
     ledger.set(key, used + 1)
     while (ledger.size > EXECUTOR_STEP_IDENTITY_LEDGER_MAX) ledger.delete(ledger.keys().next().value)
-    await this.persistState()
+    await this.persistState({ strict: true })
+    await fence()
     await this.traceEvent('production.admission_correction', { ...details, attempt: used + 1 }, { requestId })
+    await fence()
+    identity()
     this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
     this.messages.push({ role: 'user', content: `[HARNESS] productionTask refused (${error.code}): ${error.message}. Nothing ran; the committed plan is unchanged.` })
     return this.runTurn()
@@ -17258,9 +17956,24 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  normalizeManualBootstrapProduction(plan, options) {
+    return normalizeManualBootstrapProduction(this, plan, options)
+  }
+
   async reportProductionRepairs(plan, repairs) {
     const requestId = this.traceRequest?.id
-    await this.assertCurrent()
+    const owner = this.captureCheckpointOwner()
+    const intake = this.requestAdmissionOwner; const amendment = this.currentPendingAmendment()
+    const identity = () => {
+      this.assertCheckpointOwnerIdentity(owner)
+      if (amendment || this.requestAdmissionOwner !== intake || this.currentPendingAmendment() !== amendment) {
+        const stale = new AgentLoopError('Production repair cancelled or superseded')
+        stale.code = STALE_REPLY_ERROR_CODE
+        throw stale
+      }
+    }
+    const fence = async () => { await this.assertCheckpointOwnerCurrent(owner); identity() }
+    await fence()
     const committed = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
     const stepId = committed?.steps?.[committed.active_step_index]?.step_id
     const ledger = this.memory.productionRepairLedger ??= new Map()
@@ -17271,11 +17984,14 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       ledger.set(key, used + 1)
     }
     while (ledger.size > EXECUTOR_STEP_IDENTITY_LEDGER_MAX) ledger.delete(ledger.keys().next().value)
-    await this.persistState()
+    await this.persistState({ strict: true })
+    await fence()
     for (const repair of repairs) {
       await this.traceEvent('production.admission_repaired', { request_id: requestId, role: EXECUTOR_ROLE, handoff_id: this.agentContext.handoffId,
         step_id: stepId, reason: repair.code, rule: repair.rule, note: repair.note }, { requestId })
+      await fence()
     }
+    identity()
     this.messages.push({ role: 'assistant', content: JSON.stringify(plan) })
     this.messages.push({ role: 'user', content: `[HARNESS] The harness repaired your productionTask before admission: ${repairs.map(row => `${row.note} (refused as ${row.code})`).join('; ')}. Nothing else in your reply changed.` })
   }
@@ -17322,7 +18038,90 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
   }
 
+  async bindStarterBaseAcceptance(bindings) {
+    const owner = this.captureCheckpointOwner(); const key = this.activePlanKey()
+    const state = this.memory.planningState?.(key)
+    const condition = state?.goal?.definition?.done_when?.find(row => row.kind === 'automated_starter_base')
+    const grant = this.memory.currentGoalGrant?.(key)
+    if (!condition || !grant || this.agentContext.role !== PLANNER_ROLE || this.batchInFlight || this.memory.pendingOperation?.(key)) throw this.roleContractError('starter_binding_authority_missing', 'Bind facilities only for the existing starter-base acceptance at an idle planner boundary.')
+    const native = await this.assertCurrent()
+    if (native.idle !== true) throw this.roleContractError('starter_binding_native_busy', 'Reconcile active work first.')
+    const evidence = JSON.parse(String(await this.rcon.command(goalConditionCommand({ ...condition, acceptance_key: state.goal.goal_id, bindings, observation_id: this.traceRequest?.id, restart_measurement: true }))))
+    await this.assertCheckpointOwnerCurrent(owner)
+    if (evidence?.ok !== true) throw this.roleContractError('starter_binding_refused', evidence?.error ?? 'native_binding_unavailable')
+    this.memory.dispatchPlanningEvent(key, { type: PLANNING_EVENT.GOAL_ACCEPTANCE_BOUND, source: 'runtime', goal_id: state.goal.goal_id,
+      bindings, native_validated: true, grant_check: { grant_id: grant.grant_id, grant_revision: grant.revision,
+        actor_id: native.actor_id, actor_epoch: native.epoch }, now: Date.now() })
+    if (JSON.stringify(this.memory.planningState(key)?.goal?.acceptance_bindings) !== JSON.stringify(bindings)) throw this.roleContractError('starter_binding_authority_changed', 'The current goal grant no longer accepts these bindings.')
+    await this.persistState({ strict: true }); await this.assertCheckpointOwnerCurrent(owner)
+    await this.traceEvent('goal.starter_facilities_bound', { request_id: this.traceRequest?.id, goal_id: state.goal.goal_id,
+      bindings, acceptance: condition, evidence })
+    await this.assertCheckpointOwnerCurrent(owner)
+    const legacy = this.memory.currentPlan(key)
+    const waiting = this.memory.registerConditionWait(key, { id: `starter_${this.traceRequest?.id}`, goal_id: state.goal.goal_id,
+      step_id: legacy.task_board.active_step_id, actor_id: native.actor_id, actor_epoch: native.epoch, actor_session: native.session, observation_id: this.traceRequest?.id,
+      condition: { kind: 'starter_acceptance' }, state: 'active', mode: 'completion', checks: 0, max_checks: 360, timeout_ms: 600000,
+      registered_at: Date.now(), updated_at: Date.now() })
+    if (!waiting) throw this.roleContractError('starter_wait_refused', 'Canonical goal cannot register acceptance observation.')
+    await this.persistState({ strict: true }); await this.assertCheckpointOwnerCurrent(owner)
+    this.active = false
+    await this.traceEvent('request.waiting', { request_id: this.traceRequest?.id, reason: 'starter_acceptance_native_observation', wait_id: waiting.condition_wait.id })
+    return { chatMessage: 'Observing the selected factory without manual servicing; the harness will verify acceptance and hand back.', operations: [],
+      goalId: state.goal.goal_id, goalStatus: 'active', conditionWait: waiting.condition_wait, taskBoard: visibleTaskBoard(waiting.task_board) }
+  }
+
+  workingRevisionCandidate(plan) {
+    const review = this.reviewContinuation
+    const held = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
+    return plan.workingPlanRevision === true && this.completionProtocolVersion >= 3 && this.agentContext.role === PLANNER_ROLE
+      && review?.request_id === this.traceRequest?.id && review?.plan_id === held?.plan_id
+      && review?.step_id === held?.steps?.[held.active_step_index]?.step_id
+      && Array.isArray(plan.stepCompletions) && plan.stepCompletions.length > 0
+      && Array.isArray(plan.executionGuidance) && plan.executionGuidance.length === plan.stepCompletions.length
+  }
+
+  async applyWorkingRevision(plan) {
+    if (!this.workingRevisionCandidate(plan)) return undefined
+    if (plan.operations.length || plan.currentStep !== 0 || !plan.plan.length || plan.semanticCompletion || plan.assessmentOnly
+      || plan.goalDefinition) throw this.roleContractError('working_revision_invalid', 'Revise remaining deterministic work at currentStep:0 with empty operations; preserve the goal definition.')
+    const owner = this.captureCheckpointOwner()
+    const before = await this.assertCurrent()
+    if (before.idle !== true || this.batchInFlight || this.memory.pendingOperation?.(owner.key)
+      || this.currentPendingAmendment()) throw this.roleContractError('working_revision_not_idle', 'Reconcile native work and pending authority before revision.')
+    await this.validateStepCompletionDeclarations(plan, { revising: true })
+    if (plan.factoryReassignment) await reassignEmptyFactoryFurnace(this, plan.factoryReassignment)
+    await atFactoryCellBoundary(this, 'draft', () => validateFactoryCellDraft(this, plan))
+    await this.assertCheckpointOwnerCurrent(owner)
+    const after = await this.assertCurrent()
+    if (after.idle !== true || this.batchInFlight || this.memory.pendingOperation?.(owner.key)) throw this.roleContractError('working_revision_not_idle', 'Native state changed during revision.')
+    const result = this.memory.reviseWorkingPlan?.(owner.key, plan, { current: { actor_id: after.actor_id, actor_epoch: after.epoch },
+      requestId: this.traceRequest?.id, nativeIdle: true })
+    if (!result?.ok) throw this.roleContractError('working_revision_refused', result?.reason ?? 'working_revision_unavailable')
+    this.reviewContinuation = null
+    this.agentContext.dropParkedExecutor()
+    const pinned = capturePlannerSkillHandoff(owner.key, result.state, this.loadedSkillContext, this.memory.plannerSkillHandoffs)
+    this.memory.plannerSkillHandoffs ??= new Map()
+    if (pinned) this.memory.plannerSkillHandoffs.set(owner.key, pinned)
+    else this.memory.plannerSkillHandoffs.delete(owner.key)
+    const revisedOwner = this.captureCheckpointOwner()
+    await this.persistState({ strict: true, requiredSkillHandoff: pinned })
+    await this.assertCheckpointOwnerCurrent(revisedOwner)
+    await this.traceEvent('plan.working_revision_committed', { request_id: this.traceRequest?.id,
+      goal_id: revisedOwner.goalId, predecessor_plan_id: owner.planId, plan_id: result.plan.plan_id,
+      plan_version: result.plan.plan_version, effort: result.state.goal.effort, authority: 'unchanged_user_grant' })
+    await this.assertCheckpointOwnerCurrent(revisedOwner)
+    const handoff = await this.startExecutorAtCommit({ planId: result.plan.plan_id, requestId: this.traceRequest?.id })
+    if (!handoff.restaged || handoff.decision_started === false) throw this.roleContractError('working_revision_handoff_refused', handoff.reason ?? 'superseded')
+    return this.runTurn()
+  }
+
   async commitPlan(plan) {
+    const exhaustedOwner = this.#exhaustedEffortPlans.get(plan)
+    if (exhaustedOwner) {
+      await this.assertCheckpointOwnerCurrent(exhaustedOwner)
+      return this.pauseForExecutorCorrection('goal_no_progress_exhausted', exhaustedOwner.stepId, 'Goal effort exhausted without new relevant native progress; preserved the goal and blocker history.')
+    }
+    if (!this.stockDependencyAdmission && activeStockDependencyBarrier(this)) return continueStockDependencyBarrier(this)
     let refreshed = plan[REFRESHED_ENTITY_PLAN]
     if (refreshed && !refreshed.current()) throw new AgentLoopError('Entity refresh plan was cancelled or superseded')
     if (!refreshed && this.pendingEntityRefresh?.current()) refreshed = this.pendingEntityRefresh
@@ -17330,8 +18129,12 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     if (refreshed && refreshed.action !== 'bound') return refreshed.result
     // Backstop for programmatic callers: never silently drop planner actions.
     this.validatePlannerRoleOutput(plan)
+    if (plan.starterBaseBindings) return this.bindStarterBaseAcceptance(plan.starterBaseBindings)
+    if (plan.factoryReassignment && !this.workingRevisionCandidate(plan)) throw this.roleContractError('factory_reassignment_review_required', 'Declare reassignment only inside an explicit working plan revision.')
+    const revised = await this.applyWorkingRevision(plan)
+    if (revised !== undefined) return revised
     const reviewStepId = plan.plannerReview ? plan.stepId : undefined
-    const productionStepId = plan.productionTask ? plan.stepId : undefined
+    let productionStepId = plan.productionTask ? plan.stepId : undefined
     const harnessDefaults = plan.defaults
     const miningStepId = plan.stepId
     await this.validatePreflightCorrectionScope(plan)
@@ -17345,6 +18148,23 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       return this.correctExecutorStepIdentity(plan, error)
     }
     if (plan.executorCannotAuthor) return this.endSliceWithoutPlanner({ route: 'executor_reply_without_committed_plan', reason: 'executor_cannot_author_plan' })
+    const normalizedSupply = refreshed ? plan : await this.normalizeManualBootstrapProduction({ ...plan, stepId: miningStepId }, { residual: true })
+    if (normalizedSupply.productionTask && !plan.productionTask) { plan = normalizedSupply; productionStepId = miningStepId }
+    if (!plan.productionTask && !plan.plannerReview) {
+      const supplyReview = await this.reviewExecutorSupplyDrift(plan)
+      if (supplyReview !== undefined) return supplyReview
+    }
+    try {
+      await atFactoryCellBoundary(this, 'commit', () => reconcileFactoryCellUse(this, {
+        step: plan.executionGuidance?.[plan.currentStep ?? 0] ? { execution_guidance: plan.executionGuidance[plan.currentStep ?? 0], completion_contract: plan.stepCompletions?.[plan.currentStep ?? 0]?.checkpoint } : undefined,
+        phase: 'commit', operations: plan.operations,
+        productionIntent: plan.productionTask, productionProposal: Boolean(plan.productionTask), readOnly: Boolean(plan.plannerReview),
+      }))
+    } catch (error) {
+      const recovery = await recoverFactoryCellUse(this, error)
+      if (recovery.handled) return recovery.result
+      throw error
+    }
     if (harnessDefaults) await this.recordHarnessDefaults(harnessDefaults)
     if (refreshed) return continueEntityRefresh(this, refreshed)
     const missing = plan.operations.find(operation => EXACT_ENTITY_TARGET_OPERATIONS.has(operation.name) && !this.liveObservedExactTarget(operation.args?.unit_number))
@@ -17363,9 +18183,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     }
     if (plan.productionTask) return this.startExecutorProduction(plan, productionStepId)
     if (plan.plannerReview) return this.handlePlannerReview(plan, reviewStepId)
-    const supplyReview = await this.reviewExecutorSupplyDrift(plan)
-    if (supplyReview !== undefined) return supplyReview
     await this.validateStepCompletionDeclarations(plan)
+    await atFactoryCellBoundary(this, 'draft', () => validateFactoryCellDraft(this, plan))
     const heldForRoleHandoff = getActivePlanningPlan(this.memory.planningState?.(this.activePlanKey()))
     if (this.completionProtocolVersion >= 3 && this.agentContext.role === PLANNER_ROLE
       && FROZEN_PLAN_STATUSES.has(heldForRoleHandoff?.status)
@@ -17386,6 +18205,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // Durable before the handoff: a later restage of this step (the supervisor's resume after a second review) rebuilds the
       // executor from the planning state and would otherwise lose them with the conversation.
       if (notes) this.memory.recordReviewNotes?.(this.activePlanKey(), review.step_id, notes)
+      if (reviewRound && review.strict_persistence === true) {
+        const notesOwner = this.captureCheckpointOwner()
+        await this.persistState({ strict: true })
+        await this.assertCheckpointOwnerCurrent(notesOwner)
+      }
       if (reviewRound) await completeProgressReview(this, plan.chatMessage)
       // Fold C3 into C8: an executor restaged at the step close that asked for this review and has done nothing since resumes its own
       // conversation (one packet, one restage); every other handback restages as C3.
@@ -17471,6 +18295,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     await retireGoalRequirements(this, plan)
 
     const before = await this.assertCurrent()
+    if (this.stockDependencyAdmission) await this.stockDependencyAdmission.fence()
     if (this.entityRefreshAdmission) await this.entityRefreshAdmission.fence()
     if (this.gatherAdmission) {
       await this.assertCheckpointOwnerCurrent(this.gatherAdmission)
@@ -17913,6 +18738,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       if (!draft || !this.plannerOnlyDraftCandidate(plan)) {
         throw new AgentLoopError('planner_only_commit_refused: draft identity or authority changed')
       }
+      await atFactoryCellBoundary(this, 'canonical_commit', () => reconcileFactoryCellUse(this, { phase: 'commit', operations: [] }))
       let committedState
       if (draft.replacement) {
         const replaced = this.memory.commitReplacementPlan(key, {
@@ -17986,6 +18812,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       // Observation-only work has an empty gameplay batch. Commit its already
       // validated semantics without inventing a mutation or claiming completion.
       await this.assertCurrent()
+      await atFactoryCellBoundary(this, 'canonical_commit', () => reconcileFactoryCellUse(this, { phase: 'commit', operations: [] }))
       const semanticPlanning = this.memory.commitPlanningPlan(this.requestInfo.memoryKey, {
         now: Date.now(), runtime_validation: { passed: true },
       })
@@ -18017,6 +18844,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         // a player-built entity (grant-backed work) needs an approval record, reserved containers are never withdrawn from,
         // and (grant-backed work) a player's inventory is never a source. Commit re-checks the grant again below.
         if (this.requestInfo && typeof this.memory.checkOperationAdmission === 'function') {
+          await atFactoryCellBoundary(this, 'admission', () => reconcileFactoryCellUse(this, { phase: 'admission', operations: plan.operations }))
           const admission = this.memory.checkOperationAdmission(this.requestInfo.memoryKey, {
             operations: plan.operations,
             preflight,
@@ -18082,6 +18910,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         const reducerPlanBeforeCommit = planningBeforeCommit ? getActivePlanningPlan(planningBeforeCommit) : undefined
         const planFrozen = FROZEN_PLAN_STATUSES.has(reducerPlanBeforeCommit?.status)
         if (!planFrozen && this.requestInfo && typeof this.memory.commitPlanningPlan === 'function') {
+          await atFactoryCellBoundary(this, 'canonical_commit', () => reconcileFactoryCellUse(this, { phase: 'commit', operations }))
           // Preflight is the authoritative commit gate. Jev may help decide
           // what to observe or when to wake the planner, but it does not review
           // whether the Main LLM's draft is "correct" before execution.
@@ -18117,6 +18946,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       catch (caughtError) {
         let error = caughtError
         if (!error?.preflight) throw error
+        if (this.stockDependencyAdmission) {
+          await this.stockDependencyAdmission.fence()
+          error.stockDependencyNotAdmitted = true
+          throw error
+        }
+        const stockBarrier = await startStockDependencyBarrier(this, { ...plan, stepId: miningStepId }, error)
+        if (stockBarrier !== undefined) return stockBarrier
         const miningCorrection = await correctMiningLocation(this, { ...plan, stepId: miningStepId }, error.preflight)
         if (miningCorrection?.handled) return miningCorrection.result
         if (this.gatherAdmission) {
@@ -18417,10 +19253,13 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       const sendAmendment = this.pendingInteractionAmendment
       const sendBatchInFlight = this.batchInFlight
       const operationOwnerKey = this.activePlanKey()
+      let admittedFactoryFence
       const assertSendOwner = pending => {
         this.assertCheckpointOwnerIdentity(sendOwner)
         this.assertModelRecoveryAllowed()
         if (this.requestAdmissionOwner !== sendIntake || this.pendingInteractionAmendment !== sendAmendment) throw new AgentLoopError('Operation admission cancelled or superseded')
+        if (admittedFactoryFence && (this.memory.factoryWorldBinding().generation !== admittedFactoryFence.generation
+          || this.memory.getFactoryRegistry().revision !== admittedFactoryFence.revision || this.memory.factoryLifecycleRevision() !== admittedFactoryFence.physical)) throw new AgentLoopError('Factory assignment changed before native transport')
         if (pending) {
           const records = this.memory.pendingOperations?.(operationOwnerKey) ?? []
           const held = records.filter(record => record.operation_key === pending.operation_key)
@@ -18433,6 +19272,8 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
       }
       let fluidAdmission
       const pendingAdmission = await this.recordPendingOperationBeforeSend(operations, before, preflight)
+      if (this.memory.factoryRegistryStatus?.().status === 'initialized') admittedFactoryFence = { generation: this.memory.factoryWorldBinding().generation,
+        revision: this.memory.getFactoryRegistry().revision, physical: this.memory.factoryLifecycleRevision() }
       // A restage that landed during that await must not let this reply's batch through
       // (outside the try below: a stale drop is not an admission failure).
       try {
@@ -18445,6 +19286,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         }
         await this.traceEvent('operations.admit', { operations })
         const beforeSend = await this.assertCurrent()
+        if (this.stockDependencyAdmission) await this.stockDependencyAdmission.idleFence()
         if (this.entityRefreshAdmission) await this.entityRefreshAdmission.idleFence()
         if (this.gatherAdmission) {
           await this.assertCheckpointOwnerCurrent(this.gatherAdmission)
@@ -18486,7 +19328,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           await this.persistState()
         }
         await this.assertCurrent()
-        startContractPrediction(this)
+        if (!isFactoryLifecycleControllerActive(this)) startContractPrediction(this)
       }
       catch (error) {
         // MW2b: the command was sent but no valid acknowledgement came back. Ask the game what really happened (exact batch,
@@ -18571,12 +19413,22 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
           // MW5: only a refusal the game proved happened before any mutation of the first operation is world evidence; a batch
           // that may have run is never replanned, and a transport/epoch/journal refusal is a harness problem, not the world.
           const provenRefusal = error?.admission?.proven_refusal === true && operationIndex === 0
-          const admissionWake = await this.wakePlannerForReplacement({
+          const wake = {
             trigger: 'operation_admission_failure',
             provenRefusal,
             refusalCode: error?.admission?.slots?.[operationIndex ?? 0]?.refusal_code,
             batchMayHaveRun: error?.notSent !== true && error?.notAdmitted !== true && !provenRefusal,
-          })
+          }
+          if (this.replacementWakeEnabled && provenRefusal && pendingAdmission && sendBatchInFlight === false
+            && reconciliation?.verdict === RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION
+            && reconciliation.effect === EFFECT.NOT_HAPPENED && !reconciliation.applied_slots?.length) {
+            // Leave this send/turn before waking a successor. The outer redrive
+            // boundary rechecks exact durable settlement, owner and native idle.
+            deferredAdmissionWakes.set(error, { owner: sendOwner, pending: pendingAdmission, wake, error,
+              epoch: JSON.stringify(this.epoch), beforeSend: sendBatchInFlight })
+            throw error
+          }
+          const admissionWake = await this.wakePlannerForReplacement(wake)
           if (admissionWake !== undefined) return admissionWake
           throw error
         }
@@ -18588,7 +19440,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
     // U6. The reply is admitted and appended; nothing is in flight. A reply that
     // committed the plan hands the slice to a fresh executor (C3). Otherwise a step this
     // reply closed may put an executor past its hard limit (C8).
-    if (this.requestInfo && this.executorHandoffEnabled) {
+    if (this.requestInfo && this.executorHandoffEnabled && !isFactoryLifecycleControllerActive(this)) {
       const boundaryRequestId = this.traceRequest?.id
       if (committedPlanId !== undefined && commands.length > 0) await this.startExecutorAtCommit({ planId: committedPlanId, requestId: boundaryRequestId })
       else await this.executorStepCloseBoundary({ withinTurn: true, requestId: boundaryRequestId })
@@ -18783,7 +19635,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         planning_horizon: cleanMemoryText(this.planningHorizonOverride, 32) || undefined,
       },
       context: {
-        loaded_skill_ids: this.loadedSkillContext instanceof Map ? [...this.loadedSkillContext.keys()].slice(-3) : [],
+        loaded_skill_ids: this.loadedSkillContext instanceof Map ? [...this.loadedSkillContext.values()].filter(skill => compactLoadedSkill(skill, skill?.id)).map(skill => skill.id).slice(-3) : [],
         dependency_summary: planState?.dependency_context ? sanitizeDurableModelValue(planState.dependency_context) : undefined,
       },
     }
@@ -18920,6 +19772,11 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
   // review off: a held draft there would run a full planner turn inside the
   // recovery and could turn a recovery that commits into a failed one.
   async recoverPlan(generation, reason, roundBase) {
+    // A private, freshly observed assignment conflict belongs to the bounded
+    // advisory route in runTurn, not model-owned format/admission retries.
+    if (assignedFactoryConflict(reason)) throw reason
+    if (reason?.code === 'preservation_capture_superseded') throw reason
+    if (preservationFailure(reason)?.category === 'unsupported' || preservationFailure(reason)?.stage === 'capture_recovery') throw reason
     this.recoveryCommitDepth = (this.recoveryCommitDepth ?? 0) + 1
     try {
       return await this.recoverPlanRoute(generation, reason, roundBase)
@@ -19439,7 +20296,7 @@ export class NpcAgentLoop extends BaseNpcAgentLoop {
         return await this.commitRecoveryRouteDraft(generation, message, roundBase, recoveryOwner, routed.route)
       }
       catch (error) {
-        if (error?.code === 'planner_skill_handoff_unavailable' || /cancelled|superseded|epoch changed/i.test(String(error?.message ?? error))) throw error
+        if (error instanceof FactoryCellBoundaryError || preservationFailure(error) || error?.code === 'planner_skill_handoff_unavailable' || /cancelled|superseded|epoch changed/i.test(String(error?.message ?? error))) throw error
         throw new AgentLoopError(`provider_jev_recovery_route_failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
       }
       finally {

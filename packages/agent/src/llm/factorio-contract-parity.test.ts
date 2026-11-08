@@ -9,7 +9,7 @@ const operationsSource = readFileSync(operationsPath, 'utf8')
 
 type ContractSurface = 'ordinary-agent' | 'pterodactyl-runtime-v8'
 type OperationContract = { surfaces: ContractSurface[], pterodactyl_layer: 'staging-base' | 'runtime-v8-extension' }
-type ToolContract = { remote: string[], category: string, surfaces: ContractSurface[], surface_policy: 'shared' | 'runtime-v8-only' | 'ordinary-agent-only' }
+type ToolContract = { remote?: string[], execution?: 'host-observation' | 'host-context', host_handler?: string, category: string, surfaces: ContractSurface[], surface_policy: 'shared' | 'runtime-v8-only' | 'ordinary-agent-only' }
 const operationContract = contract.operations as Record<string, OperationContract>
 const toolContract = contract.tools as Record<string, ToolContract>
 
@@ -61,10 +61,13 @@ describe('canonical Factorio provider contract parity', () => {
 
   it('records current runtime-v8-only tools as intentional surface differences', () => {
     expect(toolsWithPolicy('runtime-v8-only')).toEqual([
+      'bindMachineDelivery',
       'estimateProductionTime',
+      'findKnowledge',
       'findSkills',
       'getConstructionReservations',
       'getFluidSourceTiles',
+      'getKnowledgeDetails',
       'getLocalSpatialObservation',
       'getMapContext',
       'getMiningDetails',
@@ -74,10 +77,15 @@ describe('canonical Factorio provider contract parity', () => {
       'getReservationDesignInput',
       'getResourceAmounts',
       'getSkillDetails',
+      'getWorldEntityFacts',
+      'inspectFactoryCell',
+      'listFactoryCells',
       'measureTransportThroughput',
       'planPlacement',
       'proposeConstructionLayout',
+      'readNotebook',
       'resumeConstructionLayout',
+      'updateNotebook',
       'validateConstructionPlan',
       'validateConstructionReservation',
     ])

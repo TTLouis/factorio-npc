@@ -188,7 +188,7 @@ export function preservationGeometry(raw, unitNumber) {
   if (FLUID_TYPES.has(entity.type) && !supportedFluid(entity)) throw new PreservationProofError('preservation_fluid_prototype_unsupported', { category: 'unsupported' })
   if (FLUID_TYPES.has(entity.type)) return { entity, actor_id: raw.actor_id, surface_index: raw.surface_index,
     force_index: raw.force_index, fluid: fluidPreservationGeometry(raw, raw) }
-  if (!['furnace', 'mining-drill', 'inserter'].includes(entity.type)) throw new PreservationProofError('preservation_type_unsupported', { category: 'unsupported' })
+  if (!['furnace', 'mining-drill', 'inserter', 'container'].includes(entity.type)) throw new PreservationProofError('preservation_type_unsupported', { category: 'unsupported' })
   let item_io
   if (['mining-drill', 'inserter'].includes(entity.type)) {
     if (!raw.item_io) unproven('preservation_item_route_unreadable')

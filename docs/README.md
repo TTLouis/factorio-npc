@@ -1,9 +1,11 @@
 # Documentation
 
-Start with the page that matches your task. This repository holds two lines that
-share one standalone NPC: the **external harness** on `main`, where your own AI
-harness drives the NPC through MCP, and the **built-in planner/Jev** line,
-developed on `experiment/jev-agent-architecture`. Contracts say what must hold;
+Start with [shared harness modes](HARNESS_MODES.md) for external, plan or pursuit setup.
+
+Start with the page that matches your task. All modes share one codebase on
+`main`: an **external harness** drives the NPC through MCP, **plan** uses the
+built-in planner/executor with optional Jev, and **pursuit** uses one operator
+with native goal evaluation. Contracts say what must hold;
 the [status page](NPC_AGENT_HARNESS_STATUS.md), [proofs](proofs/README.md) and
 dated records say what has been verified.
 

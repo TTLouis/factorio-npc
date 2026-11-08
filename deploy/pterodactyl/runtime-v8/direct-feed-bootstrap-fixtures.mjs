@@ -71,3 +71,27 @@ export function answerBootstrapRead(text, { inventory = {}, recipes = vanillaRec
   }
   return undefined
 }
+
+// Supplemental synthetic native projection for newly settled placement receipts.
+// The receiver remains empty/unselected; its unique available recipe is only a
+// startup capability. No inventory increase or delivered-output proof is minted.
+export function scriptedDirectFeedMembers(source, target, resource, recipe, tick) {
+  const fuel = { burner_fuel_requirement: { state: 'known', required: true, fuel_categories: ['fixture-fuel'], truncated: false },
+    fuel_item_facts: { state: 'known', coverage: 'complete', truncated: false, items: [{ name: 'coal', category: 'fixture-fuel', fuel_value: 1 }] } }
+  return [
+    { locator: source, state: 'observed', type: 'mining-drill', ...fuel, recipe: { state: 'unsupported' },
+      source_resources: { state: 'known', truncated: false, resources: [{ name: resource, products_truncated: false, products: [{ name: resource, type: 'item' }] }] },
+      item_routes: { state: 'known', truncated: false, routes: [{ kind: 'drop', state: 'connected', target }] } },
+    { locator: target, state: 'observed', type: 'furnace', ...fuel, recipe: { state: 'none', truncated: false, ingredients: [], products: [] },
+      source_resources: { state: 'not_applicable', resources: [], truncated: false },
+      inventories: [{ role: 'input', index: 2, state: 'known', truncated: false, items: [] }, { role: 'output', index: 3, state: 'known', truncated: false, items: [] }],
+      progress_facts: { crafting_progress: { state: 'known', value: 0 }, products_finished: { state: 'known', value: 0 } },
+      startup_recipe_candidates: { schema_version: 1, tick, state: 'known', coverage: 'complete', truncated: false, selection: 'unselected',
+        commissioning: 'unverified', basis: 'enabled_native_recipe_category_and_surface', candidates: [structuredClone(recipe)] },
+      incoming_item_facts: { schema_version: 1, tick, state: 'known', coverage: 'complete', truncated: false, unresolved: false,
+        producers: [{ relation: 'mining_drop', state: 'connected', producer: source }] },
+      endpoint_facts: { schema_version: 1, inventories: { state: 'known', truncated: false, endpoints: [
+        { state: 'known', inventory_index: 3, roles: { state: 'known', values: ['output'] } }] },
+      recipe_selection: { quality: { state: 'known', name: 'normal' } } } },
+  ]
+}

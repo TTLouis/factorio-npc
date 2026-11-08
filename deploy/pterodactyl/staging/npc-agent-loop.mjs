@@ -816,7 +816,9 @@ export class NpcAgentLoop {
     let duplicateThisRound = false
 
     for (const entry of prepared) {
-      const cached = this.toolCache.get(entry.signature)
+      const hostObservation = ['listFactoryCells', 'inspectFactoryCell'].includes(entry.tool.function.name)
+      if (hostObservation && (entry.command !== null || typeof entry._sglunaExecuteObservation !== 'function')) throw new AgentLoopError('Factory observation host executor is missing')
+      const cached = hostObservation ? undefined : this.toolCache.get(entry.signature)
       let output
 
       if (cached !== undefined) {
@@ -840,7 +842,13 @@ export class NpcAgentLoop {
         }
       }
       else {
-        if (entry.tool.function.name === THROUGHPUT_MEASUREMENT_TOOL) {
+        if (hostObservation) {
+          await this.assertCurrent()
+          if (typeof entry._sglunaReadFence === 'function') await entry._sglunaReadFence()
+          output = await entry._sglunaExecuteObservation()
+          await this.assertCurrent()
+        }
+        else if (entry.tool.function.name === THROUGHPUT_MEASUREMENT_TOOL) {
           output = await this.runThroughputMeasurement(entry)
         }
         else if (typeof entry._sglunaPrereadOutput === 'string') {
@@ -851,6 +859,7 @@ export class NpcAgentLoop {
         }
         else {
           await this.assertCurrent()
+          if (typeof entry.command !== 'string' || !entry.command) throw new AgentLoopError('Observation command is unavailable')
           const raw = String(await this.rcon.command(entry.command))
           // Internal harness probes validate full native identity before any
           // rendering, caching or publication. Model tool arguments cannot set this hook.
@@ -894,6 +903,8 @@ export class NpcAgentLoop {
       blocker: { class: failureClass, reason: cleanMemoryText(reason, 1200) },
     }
   }
+
+  observationDecisionCost(prepared) { return prepared.length }
 
   async runTurn() {
     const generation = this.generation
@@ -961,9 +972,10 @@ export class NpcAgentLoop {
           continue
         }
         this.toolValidationRetries = 0
-        if (this.observationDecisionPressure && prepared.length > this.observationDecisionPressureRemaining) {
+        const observationCost = this.observationDecisionCost(prepared)
+        if (this.observationDecisionPressure && observationCost > this.observationDecisionPressureRemaining) {
           await this.forceDecisionFromObservations(
-            `Observation decision pressure had ${this.observationDecisionPressureRemaining} targeted observation call(s) remaining, but the provider requested ${prepared.length}.`,
+            `Observation decision pressure had ${this.observationDecisionPressureRemaining} targeted observation call(s) remaining, but the provider requested ${observationCost}.`,
             'observation_decision_budget_exhausted',
           )
           continue
@@ -993,8 +1005,9 @@ export class NpcAgentLoop {
             content: `[HARNESS] ${reason}. The duplicate result was suppressed and earlier deterministic observations remain available. Tools stay enabled only for a specific missing fact: do not switch to a different read-only observation merely to avoid the duplicate guard. If the existing evidence already identifies a safe executable next action, return a strict-JSON plan now; otherwise make one targeted observation for the exact missing fact or report a truthful blocker. Do not guess an unobserved Factorio identity and do not force a mutation just to make progress.`,
           })
         }
+        if (observationCost === 0) continue
         if (this.observationDecisionPressure) {
-          this.observationDecisionPressureRemaining = Math.max(0, this.observationDecisionPressureRemaining - prepared.length)
+          this.observationDecisionPressureRemaining = Math.max(0, this.observationDecisionPressureRemaining - observationCost)
           if (this.observationDecisionPressureRemaining <= 0) {
             await this.forceDecisionFromObservations(
               'The targeted observation budget allowed by decision pressure is complete.',

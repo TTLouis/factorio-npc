@@ -1,4 +1,4 @@
-import { recoverPreservationVisibility, finishPreservationReobservation, assertPreservationObservationAdmission } from './preservation-recovery.mjs'
+import { recoverPreservationVisibility, finishPreservationReobservation, assertPreservationObservationAdmission, preservationObservationAdmission } from './preservation-recovery.mjs'
 import { nativeAdmissionJournal } from '../staging/native-admission-journal.mjs'
 import { getActivePlan, isStepContractPending, PLAN_STATUS } from './planning-state.mjs'
 import { evaluateCompletionContract } from './step-completion.mjs'
@@ -7,7 +7,7 @@ import { renderOperationPreflight, luaString } from './structured-policy.mjs'
 import { batchWatermark, operationSignature, unresolvedNativeAdmissions } from './operation-reconciliation.mjs'
 import { obligationContractContext, captureObligationProof, compileObligations, contractDefectShape, obligationContractMatches,
   obligationProofOrigin, preservedProofMatches, effectivePreservationProof, preservationGeometry, normalizeFluidAdmission,
-  normalizeFluidCertificate, fluidAdditionProof, isNativeEmptyPreservationSequence, PreservationProofError, CONTRACT_DEFECT_REASON } from './contract-obligations.mjs'
+  normalizeFluidCertificate, fluidAdditionProof, isNativeEmptyPreservationSequence, PreservationProofError, CONTRACT_DEFECT_REASON, obligationSignature, normalizeObligations } from './contract-obligations.mjs'
 
 function nativeUnresolved(agent, status, actor) {
   const planning = agent.memory.planningState(agent.activePlanKey())
@@ -48,6 +48,72 @@ async function nativeIdle(agent, fence) {
     && isNativeEmptyPreservationSequence(crafting.native_queue) && !crafting.persisted_owner && follow.active === false
 }
 
+// A draft has no immutable baseline yet. A transient capture failure gets one
+// durable read-only retry of the SAME intent, only across a settled native
+// boundary. Unsupported types are deterministic capability refusals, not a
+// reason to ask a model to repeat or drop the preservation requirement.
+export async function capturePlannerObligationProof(agent, obligations, fence) {
+  const owner = agent.captureCheckpointOwner(); const intake = agent.requestAdmissionOwner
+  const amendment = agent.currentPendingAmendment(); const actor = { ...agent.epoch }
+  const signature = obligationSignature(normalizeObligations(obligations))
+  const originalFence = async () => {
+    await fence(); await agent.assertCheckpointOwnerCurrent(owner)
+    if (agent.requestAdmissionOwner !== intake || agent.currentPendingAmendment() !== amendment
+      || agent.epoch?.actor_id !== actor.actor_id || agent.epoch?.epoch !== actor.epoch
+      || obligationSignature(normalizeObligations(obligations)) !== signature) {
+      const error = new Error('Preservation capture cancelled or superseded')
+      error.code = 'preservation_capture_superseded'
+      throw error
+    }
+  }
+  try {
+    const proof = await captureObligationProof(agent, obligations, originalFence)
+    await originalFence()
+    return proof
+  }
+  catch (error) {
+    await originalFence()
+    if (!(error instanceof PreservationProofError) || error.category !== 'transport_or_malformed_response') throw error
+    const key = JSON.stringify([owner.key, owner.goalId, `capture:${signature}`])
+    const fail = code => { throw new PreservationProofError(code, { stage: 'capture_recovery', category: 'exhausted', detail: { original_reason: error.code, intent_signature: signature } }) }
+    const check = async () => {
+      await originalFence()
+      if (agent.memory.preservationRecoveryFault || !owner.goalId || agent.requestAdmissionOwner !== intake || agent.currentPendingAmendment() || agent.batchInFlight
+        || agent.memory.pendingOperation?.(owner.key) || agent.memory.currentPlan(owner.key)?.condition_wait
+        || agent.memory.currentPlan(owner.key)?.persistent_runtime?.active || agent.memory.pauseRecord?.(owner.key)?.paused
+        || agent.epoch?.actor_id !== actor.actor_id || agent.epoch?.epoch !== actor.epoch
+        || obligationSignature(normalizeObligations(obligations)) !== signature) fail('preservation_capture_recovery_unsettled')
+    }
+    const idle = async () => {
+      await check()
+      if (!await nativeIdle(agent, check)) fail('preservation_capture_recovery_native_busy')
+      const raw = await agent.readTaskStatusRaw(); await check()
+      const status = typeof raw === 'string' ? JSON.parse(raw) : raw
+      if (status.task_state !== 'idle' || status.queue_empty !== true || status.queue_length !== 0 || status.active_batch
+        || status.actor?.mining_state?.mining || !nativeAdmissionJournal(status.admission_journal).known
+        || nativeUnresolved(agent, status, actor)) fail('preservation_capture_recovery_native_unsettled')
+    }
+    await idle()
+    agent.memory.preservationRecoveries ??= new Map()
+    if (agent.memory.preservationRecoveryFault || agent.memory.preservationRecoveries.size >= 128) fail('preservation_capture_recovery_ledger_unavailable')
+    if (agent.memory.preservationRecoveries.has(key)) fail('preservation_capture_recovery_exhausted')
+    const claim = { claimed_at: Date.now(), state: 'claimed' }
+    agent.memory.preservationRecoveries.set(key, claim)
+    await agent.persistState({ strict: true }); await check()
+    const details = { request_id: owner.requestTrace?.id, goal_id: owner.goalId, plan_id: owner.planId, step_id: owner.stepId,
+      actor_id: actor.actor_id, actor_epoch: actor.epoch, intent_signature: signature, reason: error.code, mechanism: 'same_intent_native_recapture' }
+    await agent.traceEvent('contract.preservation_capture_retry', details); await idle()
+    let proof
+    try { proof = await captureObligationProof(agent, obligations, check) }
+    catch (retryError) { await check(); fail(`preservation_capture_recovery_failed:${retryError.code ?? 'unreadable'}`) }
+    await idle()
+    claim.state = 'verified'
+    await agent.persistState({ strict: true }); await check()
+    await agent.traceEvent('contract.preservation_capture_recovered', { ...details, disposition: 'ordinary_draft_validation_required' }); await idle()
+    return proof
+  }
+}
+
 // An absent lazy target is advisory unknown, never an inferred connection.
 // Fueling a cell can reveal the target through the native getter. Only a target
 // already present in the frozen preservation set, with unchanged geometry and
@@ -66,7 +132,14 @@ export async function reconcilePreservationProof(agent, step, fresh, fence) {
     if (fluid) await finishPreservationReobservation(agent, step, fence)
     return fluid
   }
-  if (!preservedProofMatches(effective, fresh)) return false
+  if (!preservedProofMatches(effective, fresh)) {
+    await agent.traceEvent('contract.preservation_delta', { request_id: agent.traceRequest?.id, goal_id: plan.goal_id,
+      plan_id: plan.plan_id, step_id: step.step_id, actor_id: fresh.actor_id, actor_epoch: fresh.actor_epoch,
+      reason: 'preservation_baseline_changed', before: effective.preserved, after: fresh.preserved,
+      disposition: 'immutable_baseline_retained' })
+    await fence()
+    return false
+  }
   if (JSON.stringify(effective.preserved) === JSON.stringify(fresh.preserved)) {
     await finishPreservationReobservation(agent, step, fence)
     return true
@@ -88,6 +161,104 @@ export async function reconcilePreservationProof(agent, step, fresh, fence) {
 
 // Shared early and last-moment eligibility. This never grants a join or changes
 // an operation. Only an explicit native argument DTO can permit correction.
+// Item routes are part of both proof versions. Protect their exact endpoints
+// even when the planner named only the source, and their open pickup/drop
+// positions: a placement can change a route without mining a protected entity.
+export function itemPreservationConflict(proof, operations, preflight = []) {
+  const rows = proof?.preserved ?? []
+  const entities = rows.flatMap(row => [row.entity, ...[row.item_io?.pickup_target, row.item_io?.drop_target].filter(Boolean)])
+  const points = rows.flatMap(row => [row.item_io?.pickup_position, row.item_io?.drop_position].filter(Boolean))
+  for (const [index, operation] of (operations ?? []).entries()) {
+    const args = operation.args ?? {}
+    let reason
+    if (['clear_construction_area', 'reserve_construction_area', 'prepare_pump_site'].includes(operation.name)) reason = 'opaque_clearance'
+    if (['rotate_entity', 'mine_entity_exact'].includes(operation.name)
+      && entities.some(row => row.unit_number === args.unit_number)) reason = 'protected_identity_or_item_endpoint'
+    if (operation.name === 'mine_entity' && entities.some(row => row.name === args.entity_name)) reason = 'protected_prototype'
+    if (['place_candidate', 'place_entity', 'execute_construction_plan'].includes(operation.name)) {
+      const checked = preflight[index]
+      const composite = operation.name === 'execute_construction_plan'
+      const footprints = composite ? checked?.construction_placements?.map(row => row.planned_footprint) : [checked?.planned_footprint]
+      if (checked?.ok !== true || composite && !nonfluidConstructionWitness(checked, operation, proof)
+        || operation.name === 'place_candidate' && checked.preservation_clears_count !== 0
+        || !Array.isArray(footprints) || !footprints.length) reason = 'placement_effect_unproven'
+      else for (const footprint of footprints) {
+        const box = footprint?.tile_box
+        if (!box || ![box.left_top?.x, box.left_top?.y, box.right_bottom?.x, box.right_bottom?.y].every(Number.isFinite)
+          || box.left_top.x > box.right_bottom.x || box.left_top.y > box.right_bottom.y) reason = 'placement_footprint_unproven'
+        else if (points.some(p => p.x >= box.left_top.x && p.x <= box.right_bottom.x
+          && p.y >= box.left_top.y && p.y <= box.right_bottom.y)) reason = 'item_port_occupancy_changed'
+      }
+    }
+    if (reason) return { operation_index: index, operation: operation.name, reason,
+      protected_units: [...new Set(entities.map(row => row.unit_number))] }
+  }
+}
+
+export async function checkItemPreservationAdmission(agent, { operations, preflight, pending } = {}) {
+  const key = agent.activePlanKey()
+  const planning = agent.memory.planningState?.(key)
+  const plan = getActivePlan(planning)
+  const step = plan?.steps?.[plan.active_step_index]
+  if (![PLAN_STATUS.COMMITTED, PLAN_STATUS.EXECUTING].includes(plan?.status)
+    || !step?.obligation_proof?.preserved?.some(row => row.item_io || row.entity.type === 'container')) return
+  // The navigation recovery owns its separate last-moment admission fence.
+  if (await assertPreservationObservationAdmissionIfHeld(agent, operations, pending)) return
+  const owner = agent.captureCheckpointOwner(); const amendment = agent.currentPendingAmendment(); const intake = agent.requestAdmissionOwner
+  const fail = code => { throw new PreservationProofError(code, { stage: 'admission' }) }
+  const fence = async () => {
+    await agent.assertCheckpointOwnerCurrent(owner)
+    const live = getActivePlan(agent.memory.planningState(key))
+    if (live?.plan_id !== plan.plan_id || live?.plan_version !== plan.plan_version || live?.steps?.[live.active_step_index]?.step_id !== step.step_id) throw new Error('Item preservation admission cancelled or superseded')
+    const records = agent.memory.pendingOperations?.(key) ?? []
+    if (amendment || agent.currentPendingAmendment() !== amendment || agent.requestAdmissionOwner !== intake || agent.batchInFlight
+      || (pending ? records.length !== 1 || records[0].operation_key !== pending.operation_key || records[0].signature !== pending.signature : records.length !== 0)) fail('preservation_admission_not_safe')
+  }
+  await fence()
+  if (!obligationProofOrigin(planning, step) || pending && pending.signature !== operationSignature(operations)) fail('preservation_admission_owner_unproven')
+  if (!await nativeIdle(agent, fence)) fail('preservation_admission_native_busy')
+  const actor = await agent.assertCurrent(); await fence()
+  const fresh = { ...await captureObligationProof(agent, step.obligations, fence), binding: step.obligation_proof.binding }
+  if (!preservedProofMatches(effectivePreservationProof(plan, step, { plans: planning.plans }), fresh)) fail('preservation_baseline_changed')
+  const checked = preflight ? [...preflight] : []
+  for (const [i, operation] of (operations ?? []).entries()) {
+    if (checked[i] || !['place_candidate', 'place_entity', 'execute_construction_plan'].includes(operation.name)) continue
+    const command = operation.name === 'execute_construction_plan' ? constructionPlanWitnessCommand(operation) : renderOperationPreflight({ name: operation.name, args: operation.args })
+    try { checked[i] = command ? JSON.parse(String(await agent.rcon.command(command))) : undefined }
+    catch { checked[i] = undefined }
+    await fence()
+  }
+  const conflict = itemPreservationConflict(fresh, operations, checked)
+  if (!await nativeIdle(agent, fence)) fail('preservation_admission_native_busy')
+  if (!conflict) { await fence(); return }
+  const raw = await agent.readTaskStatusRaw(); await fence()
+  const status = typeof raw === 'string' ? JSON.parse(raw) : raw
+  const watermark = batchWatermark(status); const journal = nativeAdmissionJournal(status?.admission_journal)
+  if (!actor.session || !watermark?.idle || watermark.queue_length !== 0 || !journal.known || nativeUnresolved(agent, status, actor)
+    || pending && (watermark.generation !== pending.baseline?.generation || watermark.max_batch_id !== pending.baseline?.max_batch_id
+      || journal.records.some(row => row.operation_key === pending.operation_key))) fail('preservation_pre_admission_receipt_boundary_unproven')
+  const error = new PreservationProofError('preservation_item_route_conflict', { category: 'argument', stage: 'admission', detail: conflict })
+  error.preflight = { ok: false, code: error.code, refusal_class: 'argument', ...conflict,
+    detail: 'The entire batch is unsent. Preserve the exact protected identities and pickup/drop positions; choose only operations consistent with the same committed step, or request guarded review.' }
+  // Reuse the existing durable, same-semantic-step argument correction and its
+  // authoritative before/after journal check. No action is filtered or replayed.
+  error.fluidCandidateArgument = { owner, amendment, intake, operations: structuredClone(operations), native_session: actor.session,
+    native_generation: watermark.generation, native_max_batch_id: watermark.max_batch_id,
+    pending: pending ? structuredClone(pending) : undefined, actor_id: fresh.actor_id, actor_epoch: fresh.actor_epoch }
+  await agent.traceEvent('contract.item_preservation_refused', { request_id: agent.traceRequest?.id, goal_id: plan.goal_id,
+    plan_id: plan.plan_id, step_id: step.step_id, semantic_step_id: step.semantic_step_id ?? step.step_id,
+    actor_id: fresh.actor_id, actor_epoch: fresh.actor_epoch, ...conflict, reason: error.code, disposition: 'whole_batch_unsent', boundary: pending ? 'transport' : 'preflight' })
+  await fence()
+  throw error
+}
+
+async function assertPreservationObservationAdmissionIfHeld(agent, operations, pending) {
+  // Early preflight has no prepared record yet; the exact private navigation
+  // capability is checked by the caller's existing checkpoint path.
+  if (!preservationObservationAdmission(agent, operations)) return false
+  return pending ? assertPreservationObservationAdmission(agent, operations) : true
+}
+
 export async function checkFluidPreservationEligibility(agent, { operations, preflight, pending } = {}) {
   const key = agent.activePlanKey()
   const planning = agent.memory.planningState?.(key)
@@ -179,6 +350,7 @@ export async function confirmFluidCandidateArgumentUnsent(agent, error) {
 
 export async function prepareFluidPreservationAdmission(agent, { operations, pending } = {}) {
   if (await assertPreservationObservationAdmission(agent, operations)) return undefined
+  await checkItemPreservationAdmission(agent, { operations, pending })
   const key = agent.activePlanKey()
   const planning = agent.memory.planningState?.(key)
   const plan = getActivePlan(planning)
@@ -326,6 +498,7 @@ export function nonfluidConstructionWitness(checked, operation, fresh) {
 // the operation object in `nonfluidComposites`. Without it the name stays unsafe.
 export function fluidPreservationMutationUnsafe(proof, operations, extraEntities = [], { nonfluidComposites } = {}) {
   const entities = (proof?.preserved ?? []).flatMap(row => [row.entity,
+    ...[row.item_io?.pickup_target, row.item_io?.drop_target].filter(Boolean),
     ...(row.fluid?.storages ?? []).flatMap(storage => storage.ports.flatMap(port => port.target ? [port.target.entity] : []))])
   entities.push(...extraEntities)
   return (operations ?? []).some(operation =>

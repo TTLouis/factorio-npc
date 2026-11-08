@@ -10,6 +10,7 @@
 
 import assert from 'node:assert/strict'
 
+import { scriptedDirectFeedMembers, vanillaRecipes } from './direct-feed-bootstrap-fixtures.mjs'
 import { FurnaceFactorio, FURNACE_UNIT } from './recovery-loop-fixtures.mjs'
 
 export const DRILL_UNIT = 31
@@ -104,6 +105,9 @@ function neighbourhood() {
 export class DrillFurnaceFactorio extends FurnaceFactorio {
   constructor({ inventory = LIVE_INVENTORY, ground = [GROUND_ORE], connectedPlayers = 0 } = {}) {
     super({ inventory: { ...inventory }, connectedPlayers })
+    // Nothing is standing yet: no historical single-furnace cell may be pre-registered for a machine that has not been placed.
+    // Native member facts are scripted below only after the exact placements settle.
+    this.factoryJob = null
     Object.assign(this.status, { surface_index: surfaceIndex, force_index: 1 }) // the deployment status carries the actor's scope; the topology record needs it
     this.furnacePlaced = false
     this.furnace.position = FURNACE_POSITION
@@ -117,6 +121,7 @@ export class DrillFurnaceFactorio extends FurnaceFactorio {
     this.entityCountReads = [] // every entity_count the harness asked, with the live answer
     this.oreAccumulator = 0
     this.smeltAccumulator = 0
+    this.furnaceCrafts = 0
   }
 
   // --- reads ---------------------------------------------------------------------------------------------------------------------
@@ -186,7 +191,7 @@ export class DrillFurnaceFactorio extends FurnaceFactorio {
       const set = /candidate_set_id='([^']+)'/.exec(text)?.[1]
       const entity = set === DRILL_SET ? 'burner-mining-drill' : set === FURNACE_SET ? 'stone-furnace' : undefined
       const result = entity
-        ? { ok: true, operation: 'place_candidate', placement_item: { item_name: entity, count: 1, held_count: this.inventory[entity] ?? 0 } }
+        ? { ok: true, operation: 'place_candidate', placement_item: { entity_name: entity, item_name: entity, count: 1, held_count: this.inventory[entity] ?? 0 } }
         : { ok: false, code: 'placement_candidate_unavailable' }
       this.preflights.push({ name: 'place_candidate', args: { candidate_set_id: set }, result })
       return result
@@ -213,6 +218,10 @@ export class DrillFurnaceFactorio extends FurnaceFactorio {
   // --- commands -----------------------------------------------------------------------------------------------------------------
 
   async command(text) {
+    if (text.includes("'sgluna_factory','observe'")) {
+      this.refreshScriptedFurnaceRecipe()
+      return JSON.stringify(this.furnaceFrame(JSON.parse(await super.command(text))))
+    }
     if (text.includes('"get_placement_candidates"')) return JSON.stringify(this.candidateRead(text))
     if (text.includes("remote.call('autorio_preflight','operation','place_candidate'")) return JSON.stringify(this.furnacePreflight(text))
     if (text.includes('"autorio_prototypes","details"')) {
@@ -314,12 +323,51 @@ export class DrillFurnaceFactorio extends FurnaceFactorio {
     return reason
   }
 
+  // A furnace that holds ore or product has started crafting: its native recipe is the smelt, not the empty-startup state.
+  refreshScriptedFurnaceRecipe() {
+    const row = this.factoryMembers.get(FURNACE_UNIT)
+    const busy = [this.furnace.source, this.furnace.output].some(inventory => Object.values(inventory ?? {}).some(count => count > 0))
+    if (row && busy) {
+      row.recipe = { state: 'known', truncated: false, name: 'copper-plate', ingredients: [{ type: 'item', name: 'copper-ore', amount: 1 }],
+        products: [{ type: 'item', name: 'copper-plate', amount: 1 }] }
+    }
+  }
+
+  // The furnace in one native observation frame: item stacks carry their quality, the crafting counter is the furnace's finished
+  // crafts, and the incoming-item cut is computed at the frame's tick (the base fixture's frame leaves out all three).
+  furnaceFrame(answer) {
+    const row = answer.members?.find(member => member.locator?.unit_number === FURNACE_UNIT && member.state === 'observed')
+    if (!row) return answer
+    for (const inventory of row.inventories ?? []) inventory.items = inventory.items.map(item => ({ quality: 'normal', ...item }))
+    row.progress_facts = { ...row.progress_facts, products_finished: { state: 'known', value: this.furnaceCrafts } }
+    if (row.incoming_item_facts) row.incoming_item_facts.tick = answer.tick
+    return answer
+  }
+
+  smelt(crafts) {
+    const done = super.smelt(crafts)
+    this.furnaceCrafts += done
+    return done
+  }
+
   completeBatch() {
     const placementsBefore = this.placementReceipts.length
     const batch = super.completeBatch()
     // The batch's last basic result is its last task's: a placement receipt when the batch ended in one.
     if (this.placementReceipts.length > placementsBefore && batch.operations.at(-1)?.name === 'place_candidate') {
       this.lastBasicResult = { operation_id: batch.batch_id, tick: 600 + batch.batch_id, actor_id: this.status.actor_id, accepted: true, completed: true, code: 'completed', ...this.placementReceipts.at(-1) }
+      // The mod's placement result is exact custody only for a batch of ONE placement: it stores just the last task's result, so a
+      // two-placement batch cannot attribute the first machine and the harness refuses to enroll it (deriveFactoryPlacementReceipt).
+      if (batch.operations.length === 1) {
+        Object.assign(this.lastBasicResult, { actor_kind: this.status.actor_kind, placed_world_id: this.factoryWorldId, placed_force_index: this.status.force_index,
+          placed_batch_id: batch.batch_id, placed_batch_generation: this.generation ?? 1, placed_batch_ref: `batch-g${this.generation ?? 1}-${batch.batch_id}` })
+      }
+    }
+    // Once both machines stand, the native engine reports them (drill drop route into the furnace, empty-startup furnace capability).
+    if (this.drill.placed && this.furnacePlaced && !this.factoryMembers.has(FURNACE_UNIT)) {
+      const source = { unit_number: DRILL_UNIT, name: 'burner-mining-drill', position: DRILL_POSITION, surface_index: surfaceIndex, force_index: 1 }
+      const target = { unit_number: FURNACE_UNIT, name: 'stone-furnace', position: FURNACE_POSITION, surface_index: surfaceIndex, force_index: 1 }
+      for (const row of scriptedDirectFeedMembers(source, target, 'copper-ore', vanillaRecipes()['copper-plate'], this.gameTick)) this.factoryMembers.set(row.locator.unit_number, row)
     }
     return batch
   }
@@ -331,6 +379,7 @@ export class DrillFurnaceFactorio extends FurnaceFactorio {
   advance(seconds) {
     for (let second = 0; second < seconds; second++) {
       this.clock += 1
+      this.gameTick += 60
       if (this.drill.placed) {
         if (this.drill.energy_kj < DRILL_KW) {
           const fuel = Object.keys(this.drill.fuel).find(name => this.drill.fuel[name] > 0)

@@ -28,7 +28,7 @@ test('immutable bootstrap loader remains checksummed and pinned', () => {
   assert.match(canonical.installScript, /EXPECTED_SOURCE_SHA256="[a-f0-9]{64}"/)
 })
 
-test('main and NPC E2E eggs resolve different default source refs on reinstall', () => {
+test('both shared harness eggs resolve main while preserving their channel labels', () => {
   const canonical = buildArtifacts(source)
   const mainEgg = JSON.parse(canonical.mainEggJson)
   const e2eEgg = JSON.parse(canonical.e2eEggJson)
@@ -40,7 +40,7 @@ test('main and NPC E2E eggs resolve different default source refs on reinstall',
   assert.equal(mainEgg.variables.find(entry => entry.env_variable === 'SGLUNA_ACTOR_MODE')?.name, 'SGLuna Actor Mode')
   assert.equal(mainEgg.variables.find(entry => entry.env_variable === 'SGLUNA_CHAT_PLAYERS')?.name, 'SGLuna Chat Players')
   assert.equal(mainEgg.variables.find(entry => entry.env_variable === 'SGLUNA_SOURCE_REF')?.default_value, 'main')
-  assert.equal(e2eEgg.variables.find(entry => entry.env_variable === 'SGLUNA_SOURCE_REF')?.default_value, 'experiment/jev-agent-architecture')
+  assert.equal(e2eEgg.variables.find(entry => entry.env_variable === 'SGLUNA_SOURCE_REF')?.default_value, 'main')
   assert.notEqual(mainEgg.scripts.installation.script, e2eEgg.scripts.installation.script)
   assert.match(mainEgg.scripts.installation.script, /CHANNEL="main"/)
   assert.match(e2eEgg.scripts.installation.script, /CHANNEL="npc-e2e"/)

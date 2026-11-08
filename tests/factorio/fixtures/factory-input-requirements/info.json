@@ -1,0 +1,8 @@
+{
+  "name": "factory-input-requirements-fixture",
+  "version": "0.0.1",
+  "title": "Synthetic factory requirement bound fixture",
+  "author": "Factorio NPC tests",
+  "factorio_version": "2.0",
+  "dependencies": ["base"]
+}

@@ -1,8 +1,8 @@
 # SGLuna Factorio — NPC Agent Harness Status
 
-This page summarises what is verified now for the two lines in this repository: the
-external harness on `main`, and the built-in planner/Jev line on
-`experiment/jev-agent-architecture`. Dated checkpoints through October 24, 2026 are in
+External, plan and pursuit now share one source codebase; see [harness modes](HARNESS_MODES.md).
+The historical evidence below retains its original candidate and scope. Consolidation
+does not establish new gameplay success. Dated checkpoints through October 24, 2026 are in
 the [status log](https://github.com/TTLouis/factorio-npc/blob/b860bd9e7b54d02d690d8b6cf74e2c9c1fb8ba98/docs/validation/NPC_AGENT_HARNESS_STATUS_LOG_2026-09-16_TO_2026-10-24.md).
 Newer dated evidence is in [proofs](proofs/README.md) and
 [validation history](validation/README.md). Keep new raw evidence locally; publish only reviewed proof summaries.
@@ -26,14 +26,14 @@ Newer dated evidence is in [proofs](proofs/README.md) and
 - Supported operations and limits are in the
   [runtime guide](EXTERNAL_HARNESS.md#current-capability-boundary).
 
-### Built-in planner and Jev (`experiment/jev-agent-architecture`)
+### Built-in planner and Jev (plan mode; historical experiment evidence)
 
 The last checkpoint recorded on this page is the
 [reviewed Run AU repair](https://github.com/TTLouis/factorio-npc/blob/b860bd9e7b54d02d690d8b6cf74e2c9c1fb8ba98/docs/validation/RUN_AU_HARNESS_REPAIR_2026-10-24.md) of
 October 24. It restores safe continuation; it is not gameplay success. Later Run
 AV–AY repair records (October 25–26) are listed in
-[validation history](validation/README.md). This line is developed on its own
-branch, not on `main`.
+[validation history](validation/README.md). Those reports refer to their own
+historical experiment candidate. The implementation is now preserved in the shared codebase.
 
 ## Verified standalone-NPC foundation
 

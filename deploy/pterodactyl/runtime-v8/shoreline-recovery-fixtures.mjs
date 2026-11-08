@@ -21,18 +21,34 @@ export const search = (name, args = {}) => ({ content: null, tool_calls: [{ id: 
 export const waterRead = radius => search('getFluidSourceTiles', { fluid_name: 'water', search_radius: radius, limit: 4 })
 export const pumpRead = () => search('getPlacementCandidates', { entity_name: 'offshore-pump', radius: 24, limit: 1 })
 export const block = () => decision([], { chatMessage: 'BLOCKED: No offshore-pump site within 24 tiles and no water was returned. I cannot build the connected power chain.' })
-export const decision = (operations, rest = {}) => planReply({ plan: ['Build and power the lab, then craft one red pack'], currentStep: 0, operations, ...rest })
+const POWER_MEMBERS = [
+  { role: 'water', entity: 'offshore-pump' }, { role: 'steam', entity: 'boiler' }, { role: 'generator', entity: 'steam-engine' },
+  { role: 'distribution', entity: 'small-electric-pole' }, { role: 'consumer', entity: 'lab' },
+]
+// New synthetic declaration for the composed search/construction scenario. The
+// original powered-lab checkpoint stays unchanged; no machine exists at start.
+const POWER_GUIDANCE = { approach: 'Establish the declared power block after native water discovery', rationale: 'Keep the supplied construction result assigned',
+  constraints: [], skillIds: [], cellIntent: { kind: 'production_block', purpose: 'Synthetic shoreline power construction',
+    members: POWER_MEMBERS, outputs: [{ role: 'generator', kind: 'power', resource: null }] } }
+export const decision = (operations, rest = {}) => planReply({ plan: ['Build and power the lab, then craft one red pack'], currentStep: 0,
+  executionGuidance: [structuredClone(POWER_GUIDANCE)], operations, ...rest })
 export const walk = { name: 'walk_to_position', args: { ...RUN_M_SEARCHES[2].result.ungenerated_chunks[0].center } }
 export const placements = ['offshore-pump', 'boiler', 'steam-engine', 'small-electric-pole', 'lab'].map((entity_name, i) => ({ name: 'place_entity', args: { entity_name, x: walk.args.x + i * 3, y: walk.args.y - 28 } }))
 
-// A bounded fake physical model: no world state changes until an admitted batch
-// completes. The native lane proves the same exploration/power path in Factorio.
+// A bounded synthetic physical model: no world state changes until an admitted
+// batch completes. Singleton receipts are new fixture evidence, not a replay of
+// the historical aggregate construction or proof of native game mechanics.
 export class ShorelineGame extends FurnaceFactorio {
   constructor() {
-    super({ inventory: { 'offshore-pump': 1, boiler: 1, 'steam-engine': 1, 'small-electric-pole': 1, lab: 1, coal: 5, 'iron-plate': 2, 'copper-plate': 1 } })
+    super({ factoryJob: null, inventory: { 'offshore-pump': 1, boiler: 1, 'steam-engine': 1, 'small-electric-pole': 1, lab: 1, coal: 5, 'iron-plate': 2, 'copper-plate': 1 } })
     this.position = { ...RUN_M_SEARCHES[2].result.actor_position }; this.explored = false; this.placed = new Set(); this.powered = false
     this.preflight = () => ({ ok: true })
     this.discoveryCenter = walk.args; this.placementOps = placements
+  }
+  installFactoryFixture(memory) {
+    // Bind only a synthetic world. Members/receipts are created by completed
+    // placements below, never adopted from a future plan or the inherited fake.
+    if (memory.factoryRegistryStatus().status === 'uninitialized') memory.initializeFactoryRegistry(this.factoryWorldId)
   }
   fluid(radius) {
     if (!this.explored) return structuredClone(RUN_M_SEARCHES[radius === 256 ? 2 : 0].result)
@@ -53,7 +69,8 @@ export class ShorelineGame extends FurnaceFactorio {
       radius: 24, legal_candidate_count: this.explored ? 1 : 0, returned_candidate_count: this.explored ? 1 : 0,
       candidates: [{ ...this.placementOps[0].args, direction: 0, candidate_id: 'pump-current' }] })
     if (text.includes('"evaluate_condition"') && text.includes('entity_count')) return JSON.stringify({ ok: true, kind: 'entity_count', prototype: 'lab', state: 'powered', satisfied: this.powered, current: this.powered ? 1 : 0, progressing: false, progress_known: true })
-    if (text.includes('"autorio_actor","status"')) return JSON.stringify({ mode: 'npc', actor: { actor_id: this.status.actor_id, position: this.position, surface_index: 1, valid: true } })
+    if (text.includes('"autorio_actor","status"')) return JSON.stringify({ mode: this.status.mode, surface_index: this.status.surface_index, force_index: this.status.force_index,
+      actor: { actor_id: this.status.actor_id, position: this.position, surface_index: this.status.surface_index, kind: this.status.actor_kind, valid: this.status.allowed === true } })
     if (text.includes('"autorio_prototypes","details"')) return JSON.stringify({ found: false, query: 'lab' })
     if (text.includes('"get_nearby_entities"')) return JSON.stringify({ actor_position: this.position, entities: this.placed.has('boiler') ? [{ unit_number: this.furnace.unit_number, name: 'boiler', position: this.placementOps[1].args, surface_index: 1 }] : [] })
     const answer = await super.command(text)
@@ -75,6 +92,20 @@ export class ShorelineGame extends FurnaceFactorio {
         const name = /^'([^']+)'/.exec(op.args.raw)?.[1]
         assert.equal(this.explored, true); assert.equal(this.inventory[name], 1); assert.ok(!this.placed.has(name))
         delete this.inventory[name]; this.placed.add(name)
+        assert.equal(operations.length, 1, 'factory placement receipts require one actual operation')
+        const index = this.placementOps.findIndex(operation => operation.args.entity_name === name)
+        assert.ok(index >= 0)
+        const position = { x: this.placementOps[index].args.x, y: this.placementOps[index].args.y }
+        const unit = name === 'boiler' ? this.furnace.unit_number : 100 + index
+        const type = { 'offshore-pump': 'offshore-pump', boiler: 'boiler', 'steam-engine': 'generator', 'small-electric-pole': 'electric-pole', lab: 'lab' }[name]
+        if (name === 'boiler') { this.furnace.name = name; this.furnace.position = position }
+        this.factoryMembers.set(unit, { locator: { unit_number: unit, name, position, surface_index: 1, force_index: 1 }, type, state: 'observed',
+          recipe: { state: 'unsupported' }, endpoint_facts: { schema_version: 1 },
+          ...(type === 'generator' ? { progress_facts: { electricity_production: { state: 'known', producer: true } } } : {}) })
+        Object.assign(this.lastBasicResult, { type: 'placing', entity_name: name, placed_unit_number: unit, placed_position: position,
+          actor_kind: this.status.actor_kind, placed_world_id: this.factoryWorldId, placed_last_user: null,
+          placed_force_index: 1, placed_surface_index: 1, placed_entity_type: type, placed_direction: 0,
+          placed_batch_id: batch.batch_id, placed_batch_generation: this.generation, placed_batch_ref: `batch-g${this.generation}-${batch.batch_id}` })
       }
       if (op.name === 'supply_entity') this.powered = this.placed.size === 5 && this.inventory.coal < 5
       if (op.name === 'craft_item') {
@@ -111,8 +142,11 @@ export function queueShorelineDiscovery(model, placementOps = placements) {
     .push('executor', 'place-connected-chain', messages => {
       const candidate = JSON.parse([...messages].reverse().find(m => m.role === 'tool').content).candidates[0]
       assert.equal(candidate.x, placementOps[0].args.x); assert.equal(candidate.y, placementOps[0].args.y)
-      return decision(placementOps)
+      return decision([placementOps[0]])
     })
+  // Each subsequent placement is another scripted model decision and settles
+  // its own exact native receipt. The harness never expands a model batch.
+  for (const op of placementOps.slice(1)) model.push('executor', `place-${op.args.entity_name}`, decision([op]))
 }
 export async function finishShoreline(ctx, { afterWalk = false, expectedSteps = structuredClone(ctx.world.memory.planningState(KEY).plans.at(-1).steps) } = {}) {
   if (!afterWalk) {
@@ -127,7 +161,7 @@ export async function finishShoreline(ctx, { afterWalk = false, expectedSteps = 
       return decision([{ name: 'supply_entity', args: { unit_number: boiler.unit_number, items: [{ item_name: 'coal', count: 1 }] } }])
     })
   assert.ok(ctx.game.pendingBatch, JSON.stringify({ labels: ctx.model.labels, violations: ctx.model.violations, remaining: ctx.model.remaining, logs: ctx.logs, agentLogs: ctx.world.agentLogs, trace: ctx.world.trace.slice(-15) }))
-  await completeAndReport(ctx)
+  for (const _operation of ctx.game.placementOps) await completeAndReport(ctx)
   assert.equal(ctx.world.memory.currentPlan(KEY).task_board.completed_count, 0, 'placement is not powered science')
   ctx.model.push('executor', 'craft-one-red-pack', decision([{ name: 'craft_item', args: { item_name: 'automation-science-pack', count: 1 } }]))
   await completeAndReport(ctx)

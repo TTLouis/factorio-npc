@@ -106,6 +106,19 @@ export function restoreProductionTask(raw) {
   for (const key of ['transitions', 'recoveries', 'fuel_used']) task[key] = quantity(raw[key], { zero: true })
   if (task.transitions > PRODUCTION_LIMITS.transitions || task.recoveries > PRODUCTION_LIMITS.recoveries || task.fuel_used > (task.intent.fuel?.count ?? 0)) throw new Error('invalid_production_allowance')
   if (raw.fuel_source !== undefined) task.fuel_source = fuelSource(task, raw.fuel_source)
+  if (raw.producer_bindings !== undefined) {
+    const bindings = normalizeProductionIntent({ targets: task.intent.targets, producers: raw.producer_bindings }).producers
+    if (!bindings.length || bindings.length + task.intent.producers.length > 8 || task.recoveries < 1 || task.collection_only
+      || new Set(bindings.map(row => row.unit_number)).size !== bindings.length
+      || bindings.some(row => task.intent.producers.some(other => other.recipe_name === row.recipe_name || other.unit_number === row.unit_number))) throw new Error('invalid_production_producer_bindings')
+    task.producer_bindings = bindings
+  }
+  if (raw.producer_wait !== undefined) {
+    exact(raw.producer_wait, ['after_batch', 'reason'])
+    if (task.collection_only || task.producer_bindings || task.recoveries < 1 || typeof raw.producer_wait.after_batch !== 'string'
+      || raw.producer_wait.after_batch.length > 200 || !['production_binding_no_eligible_producer', 'production_binding_ambiguous'].includes(raw.producer_wait.reason)) throw new Error('invalid_production_producer_wait')
+    task.producer_wait = { ...raw.producer_wait }
+  }
   return { ...task, status: raw.status, deadline_at: raw.deadline_at, last_progress_at: raw.last_progress_at,
     last_fingerprint: typeof raw.last_fingerprint === 'string' && raw.last_fingerprint.length <= 20000 ? raw.last_fingerprint : null,
     ...(typeof raw.pause_reason === 'string' ? { pause_reason: raw.pause_reason.slice(0, 200) } : {}) }
@@ -120,6 +133,15 @@ function fuelSource(task, raw) {
   return { item_name: name, method: raw.method }
 }
 function halt(task, reason) { return { action: 'pause', reason, task: { ...task, status: 'paused', pause_reason: reason } } }
+export function productionBindings(task) { return [...task.intent.producers, ...(task.producer_bindings ?? [])] }
+export function bindProductionProducers(raw, bindings) {
+  const task = restoreProductionTask(raw)
+  if (task.status !== 'active' || task.collection_only || task.producer_bindings) return halt(task, 'production_producer_binding_unrepairable')
+  if (task.recoveries >= PRODUCTION_LIMITS.recoveries) return halt(task, 'production_recovery_exhausted')
+  const { producer_wait: _wait, ...before } = task
+  return { action: 'reconcile', reason: 'production_producer_unbound',
+    task: restoreProductionTask({ ...before, recoveries: task.recoveries + 1, producer_bindings: bindings }) }
+}
 export function recoverProductionTask(raw, reason) {
   const task = restoreProductionTask(raw)
   if (task.recoveries >= PRODUCTION_LIMITS.recoveries) return halt(task, 'production_recovery_exhausted')
@@ -153,6 +175,7 @@ export function machineFacts(entity) {
 }
 export function advanceProductionTask(raw, facts, now = Date.now()) {
   const task = restoreProductionTask(raw)
+  const producers = productionBindings(task)
   if (task.status !== 'active') return { action: task.status === 'complete' ? 'complete' : 'pause', reason: task.pause_reason, task }
   if (facts.actor_id !== task.actor_id || facts.epoch !== task.epoch || materialOwnerKey(facts.owner) !== materialOwnerKey(task.owner)) return { action: 'stale', reason: 'production_owner_changed', task }
   if (facts.native_idle !== true || facts.pending === true) return { action: 'defer', reason: 'native_or_uncertain_work_pending', task }
@@ -198,7 +221,7 @@ export function advanceProductionTask(raw, facts, now = Date.now()) {
     // widen its authority into feeding/crafting if the previously seen output
     // disappears. Reconcile the complete target set before moving anything.
     const remaining = task.intent.targets.map(target => {
-      const binding = task.intent.producers.find(row => row.recipe_name === target.item_name)
+      const binding = producers.find(row => row.recipe_name === target.item_name)
       return { target, machine: machines.find(row => row.unit_number === binding?.unit_number),
         missing: Math.max(0, target.count - (availability.available[target.item_name] ?? 0)) }
     })
@@ -210,7 +233,7 @@ export function advanceProductionTask(raw, facts, now = Date.now()) {
   }
   // Existing exact output is collected before acquiring or producing its deficit.
   for (const node of bill.nodes) {
-    const binding = task.intent.producers.find(row => row.recipe_name === node.name)
+    const binding = producers.find(row => row.recipe_name === node.name)
     const machine = binding && machines.find(row => row.unit_number === binding.unit_number)
     if (binding && !machine) return halt(task, 'production_machine_identity_missing')
     if ((machine?.output[node.item_name] ?? 0) > 0) return emit({ name: 'move_items_exact', args: { unit_number: machine.unit_number, item_name: node.item_name, max_count: Math.min(node.desired_items, machine.output[node.item_name]), to_entity: false } })
@@ -218,11 +241,11 @@ export function advanceProductionTask(raw, facts, now = Date.now()) {
   for (const feeder of task.intent.feeders) {
     const machine = machines.find(row => row.unit_number === feeder.unit_number)
     if (!machine || machine.type !== 'mining-drill' || machine.drop_target !== feeder.output_unit_number
-      || !task.intent.producers.some(row => row.unit_number === feeder.output_unit_number)) return halt(task, 'production_feeder_link_unproven')
+      || !producers.some(row => row.unit_number === feeder.output_unit_number)) return halt(task, 'production_feeder_link_unproven')
     if (machine.energy_source === 'burner' && machine.status_name === 'no_fuel') return refuel(machine)
   }
   for (const node of bill.nodes) {
-    const binding = task.intent.producers.find(row => row.recipe_name === node.name)
+    const binding = producers.find(row => row.recipe_name === node.name)
     const machine = binding && machines.find(row => row.unit_number === binding.unit_number)
     if (machine) {
       const recipe = facts.recipes.find(row => row.name === node.name)

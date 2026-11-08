@@ -1,4 +1,6 @@
+import { AgentNotebookStore } from './agent-notebook.mjs'
 import { completedSliceAnchor } from './next-slice-state.mjs'
+import { boardPlanAlignment, carriedPrefixLength } from './board-plan-alignment.mjs'
 import { NpcDialogueMemory, OPERATION_FAILURE_RECOVERABLE_KIND, TRANSFER_SUPPLY_RECOVERABLE_KIND, TRANSFER_SUPPLY_RECOVERY_BUDGET, transferSupplyRecoveryCount } from './npc-agent-loop.mjs'
 import { restoreGatherRecoveries } from './gather-recovery.mjs'
 import { restoreLedger as restoreJevLedger, serializeLedger as serializeJevLedger } from './jev-judgments.mjs'
@@ -13,6 +15,11 @@ import { restoreControllerRecoveries } from './controller-liveness.mjs'
 import { restoreEntityRefreshClaims } from './entity-refresh.mjs'
 import { restoreProgressAudits } from './executor-progress-audit.mjs'
 import { restorePreservationRecoveries } from './preservation-recovery.mjs'
+import { restoreStockDependencyBarriers } from './bg-stock-dependency.mjs'
+import { FactoryRegistryStore } from './factory-registry-runtime.mjs'
+import { FactoryUseRecoveryStore } from './factory-cell-use-recovery.mjs'
+import { committedFactoryCellIntent, factoryCellIntentSignature } from './factory-cell-intent.mjs'
+import { factoryUseDecision, factoryOperationUseDecision } from './factory-cell-use.mjs'
 import { createTaskBoard, reconcileTaskBoard, setTaskBoardStatus, taskBoardTransferSupplyRefSeen } from './common.mjs'
 import { validateOutcomeCandidate } from './outcome-authority.mjs'
 import { PAUSE_CLASS, TRANSPORT_SUBKINDS } from './pause-class.mjs'
@@ -55,7 +62,7 @@ import {
   STEERING_BOUNDARY,
   steeringContextForDraft,
 } from './planning-state.mjs'
-import { operationSignature } from './operation-reconciliation.mjs'
+import { operationSignature, TERMINAL_TRANSFER_REFUSAL_CAUSES } from './operation-reconciliation.mjs'
 import { pendingOperations, conflictingOperation } from './operation-ledger.mjs'
 import {
   mostRecentResumable,
@@ -63,6 +70,7 @@ import {
   taskLedgerView,
   TASK_LEDGER_REFUSAL,
 } from './task-ledger.mjs'
+export { boardPlanAlignment } from './board-plan-alignment.mjs'
 export { completionFinalizationDecision } from './completion-finalization.mjs'
 
 // Which reducer event carries each legacy run field.
@@ -113,32 +121,6 @@ function revisionSuffix(previousBoard, incomingPlan) {
   const includesVerifiedPrefix = Array.from({ length: completed }, (_, index) =>
     clean(incoming[index]) === clean(previousBoard.steps?.[index]?.description)).every(Boolean)
   return includesVerifiedPrefix ? incoming.slice(completed) : incoming
-}
-
-// Two step lists describe the same slice when their normalized descriptions
-// match one for one. Long descriptions are compared on a bounded prefix so a
-// truncation on either side cannot split them.
-function stepKey(description) {
-  return clean(description).slice(0, 200)
-}
-
-function carriedPrefixLength(plan) {
-  return Array.isArray(plan?.carried_forward_evidence) ? plan.carried_forward_evidence.length : 0
-}
-
-/**
- * How the legacy board and the reducer plan line up: the board index of the
- * reducer plan's first step. A revised plan carries its verified predecessor
- * steps on the board only (offset = carried prefix); every other plan starts
- * at 0. `undefined` when the two do not describe the same steps.
- */
-export function boardPlanAlignment(board, plan) {
-  if (!Array.isArray(board?.steps) || !Array.isArray(plan?.steps) || plan.steps.length === 0) return undefined
-  const aligned = offset => board.steps.length === offset + plan.steps.length
-    && plan.steps.every((step, index) => stepKey(step?.description) === stepKey(board.steps[offset + index]?.description))
-  const carried = carriedPrefixLength(plan)
-  if (carried > 0 && aligned(carried)) return carried
-  return aligned(0) ? 0 : undefined
 }
 
 /**
@@ -444,9 +426,9 @@ function correctableTransferTarget(evidence, state, plan) {
   const basic = receipt?.basic_operation
   const admitted = receipt?.admitted_batch
   const correlation = receipt?.correlation
+  const refusalCause = TERMINAL_TRANSFER_REFUSAL_CAUSES.find(cause => receipt?.reason === `moving_items:nothing_moved:${cause}`)
   const partial = admitted?.terminal_partial === true && basic?.code === 'nothing_moved'
-    && basic.to_entity === true && basic.moved_count === 0
-    && receipt.reason === 'moving_items:nothing_moved:target_rejects_item'
+    && basic.to_entity === true && basic.moved_count === 0 && refusalCause !== undefined
   if (evidence?.kind !== 'operation_error_receipt' || basic?.type !== 'moving_items'
     || (!partial && basic.code !== 'no_target') || basic.accepted !== false || basic.completed !== false
     || (!partial && basic.target_unit_number !== undefined) || basic.player_name !== undefined
@@ -477,6 +459,7 @@ function correctableTransferTarget(evidence, state, plan) {
     item_name: basic.item_name, requested_count: basic.requested_count, to_entity: basic.to_entity,
     target_unit_number: basic.target_unit_number,
     recovery: partial ? 'terminal_transfer_refusal' : 'local_target_reacquisition', operation_key: admitted.operation_key,
+    ...(partial ? { refusal_cause: refusalCause } : {}),
   }
 }
 
@@ -686,11 +669,26 @@ function sanitizeIntakeRetry(record) {
   }
 }
 
+function validCompletedControl(value) {
+  return value?.version === 1 && value.goal_status === 'completed' && typeof value.goal_id === 'string' && value.goal_id.length > 0 && value.goal_id.length <= 120
+    && Number.isSafeInteger(value.actor_id) && value.actor_id > 0 && Number.isSafeInteger(value.actor_epoch) && value.actor_epoch >= 0
+    && typeof value.session_id === 'string' && value.session_id.length > 0 && value.session_id.length <= 200 && Number.isFinite(value.completed_at)
+    && (value.operator_pause === undefined || value.operator_pause?.reason === 'user_stop' && value.operator_pause.pause_class === 'operator' && Number.isFinite(value.operator_pause.at))
+}
+
 export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
+  #completedControls = new Map()
+  #completedControlsFault
+  #factoryRegistry
+  #factoryUseRecovery = new FactoryUseRecoveryStore()
+  #factoryControlRevision = 0
+
   constructor(options = {}) {
     super(options)
+    this.#factoryRegistry = new FactoryRegistryStore(options.expectedFactoryWorldId)
     this.planningByNpc = new Map()
     this.plannerSkillHandoffs = new Map()
+    this.notebooks = new AgentNotebookStore()
     // The pending intake retry (at most one: a new request or control cancels it). Durable.
     this.intakeRetryRecord = undefined
     // Board progress the reducer could not be brought up to on restore.
@@ -707,6 +705,66 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
 
   planningState(key) {
     return key ? this.planningByNpc.get(key) : undefined
+  }
+
+  // Host-only world lifecycle. No goal/actor-derived identity and no model tool.
+  initializeFactoryRegistry(worldId) { return this.#factoryRegistry.initialize(worldId) }
+  getFactoryRegistry() { return this.#factoryRegistry.read() }
+  consumeFactoryUseRecovery(key, requirement, attempt) {
+    const state = this.planningState(key); const plan = getActivePlan(state)
+    if (state?.goal?.status !== 'active' || plan?.plan_id !== attempt.plan_id) throw new Error('factory_use_recovery_owner_stale')
+    return this.#factoryUseRecovery.consume(state.goal.goal_id, requirement, attempt)
+  }
+  getFactoryOperationalRegistry() { return this.#factoryRegistry.operational() }
+  factoryLifecycleRevision() { return this.#factoryRegistry.lifecycleRevision() }
+  factoryControlRevision() {
+    if (this.#factoryControlRevision === Number.MAX_SAFE_INTEGER) throw new Error('factory_control_history_unavailable')
+    return this.#factoryControlRevision
+  }
+  factoryLifecycleTransactions() { return this.#factoryRegistry.lifecycleTransactions() }
+  factoryTemporaryIntents() { return this.#factoryRegistry.lifecycleTemporaryIntents() }
+  factoryTemporaryAssets() { return this.#factoryRegistry.lifecycleTemporaryAssets() }
+  markFactoryLifecyclePersisted(snapshot) { return this.#factoryRegistry.markLifecyclePersisted(snapshot) }
+  createFactoryCellLifecycleRuntime(key, readContext) { return this.#factoryRegistry.lifecycleRuntime(this, key, readContext) }
+  factoryRegistryStatus() { return this.#factoryRegistry.status() }
+  factoryWorldBinding() { return this.#factoryRegistry.worldBinding() }
+  factoryCellObservations() { return this.#factoryRegistry.observations() }
+  factoryPlacementReceipt(id) { return this.#factoryRegistry.placementReceipt(id) }
+  factoryPlacementReceipts(scope) { return this.#factoryRegistry.placementReceipts(scope) }
+  factoryPlacementCapacity() { return this.#factoryRegistry.placementCapacity() }
+  factoryMetadataPending() { return this.#factoryRegistry.metadataPending() }
+  factoryMetadataPersistenceSnapshot(ticket, phase) { return this.#factoryRegistry.metadataPersistenceSnapshot(ticket, phase) }
+  assertFactoryMetadataPersistence(ticket, phase) { return this.#factoryRegistry.assertMetadataPersistence(ticket, phase) }
+  assertFactoryMetadataOwner(ticket) { return this.#factoryRegistry.assertMetadataOwner(ticket) }
+  markFactoryMetadataPersisted(ticket, phase) { return this.#factoryRegistry.markMetadataPersisted(ticket, phase) }
+  finishFactoryMetadata(ticket) { return this.#factoryRegistry.finishMetadata(ticket) }
+  abortFactoryMetadata(ticket) { return this.#factoryRegistry.abortMetadata(ticket) }
+  invalidateFactoryEnrollmentPersistence() { this.#factoryRegistry.invalidateEnrollmentPersistence() }
+  factoryGoalEnrollmentStatus(key) {
+    try {
+      const state = this.planningState(key); const plan = getActivePlan(state); const step = plan?.steps?.[plan.active_step_index]
+      if (!committedFactoryCellIntent(step)) return { required: false }
+      const scope = { world_id: this.#factoryRegistry.worldBinding().world_id, goal_id: plan.goal_id, semantic_step_id: step.semantic_step_id ?? step.step_id }
+      const cell = this.#factoryRegistry.read().cells.find(row => row.enrollment?.goal_id === scope.goal_id && row.enrollment.semantic_step_id === scope.semantic_step_id)
+      if (cell && cell.enrollment.intent_signature === factoryCellIntentSignature(step.execution_guidance)) return { required: true, enrolled: true, cell_id: cell.cell_id, receipt_ids: [...cell.enrollment.receipt_ids] }
+      const receipts = this.#factoryRegistry.placementReceipts(scope)
+      const pending = pendingOperations(state).some(row => row.goal_id === plan.goal_id && row.operations?.some(op => ['place_entity', 'place_candidate', 'execute_construction_plan'].includes(op.name)))
+      return { required: Boolean(cell || receipts.length || pending), enrolled: false, reason: 'factory_enrollment_required', receipt_ids: receipts.map(row => row.receipt_id) }
+    }
+    catch { return { required: true, enrolled: false, reason: 'factory_enrollment_unavailable' } }
+  }
+  invalidateFactoryPlacementPersistence() { this.#factoryRegistry.invalidatePlacementPersistence() }
+  recordFactoryPlacementReceipt(receipt, generation) {
+    const result = this.#factoryRegistry.recordPlacementReceipt(receipt, generation)
+    this.#authTrace('factory_placement.retained', { receipt_id: receipt.receipt_id, status: result.status,
+      operation_key: receipt.operation_key, batch_ref: receipt.batch_ref, goal_id: receipt.goal_id,
+      plan_id: receipt.plan_id, step_id: receipt.step_id, unit_number: receipt.unit_number }, receipt.request_id)
+    return result
+  }
+  getFactoryMemberAssignment(identity) { return this.#factoryRegistry.member(identity) }
+  factoryPlacementAvailability(placement) { return this.#factoryRegistry.placementAvailability(placement) }
+  createFactoryRegistryRuntime(key, readContext, readPlacementReceipt) {
+    return this.#factoryRegistry.runtime(this, key, readContext, readPlacementReceipt ?? (id => this.factoryPlacementReceipt(id)), (name, payload) => this.#authTrace(name, payload, payload.request_id))
   }
 
   // The pending intake retry, or undefined. The caller persists (agent.persistState) after a change.
@@ -769,6 +827,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       objective: objective.slice(0, 1000),
     })
     this.planningByNpc.set(key, next)
+    if (next !== current && next.goal?.status === GOAL_STATUS.ACTIVE) this.#completedControls.delete(key)
     return next
   }
 
@@ -796,6 +855,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     })
     if (!next?.goal || next === planning) return undefined
     this.planningByNpc.set(key, next)
+    this.#completedControls.delete(key)
     return next.goal.goal_id
   }
 
@@ -835,6 +895,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   }
 
   recordRunPause(key, state, reason, pauseInfo = {}) {
+    if (pauseInfo?.pause_class === PAUSE_CLASS.OPERATOR) this.#factoryControlRevision = Math.min(Number.MAX_SAFE_INTEGER, this.#factoryControlRevision + 1)
     if (!this.#reducerHoldsGoal(key, state)) return super.recordRunPause(key, state, reason, pauseInfo)
     const after = this.#applyRunEvent(key, {
       type: PLANNING_EVENT.RUN_PAUSED,
@@ -1238,6 +1299,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const before = this.planningByNpc.get(key) ?? createEmptyPlanningState()
     const after = applyPlanningEvent(before, event)
     if (after !== before || this.planningByNpc.has(key)) this.planningByNpc.set(key, after)
+    if (event.type === PLANNING_EVENT.GOAL_ACCEPTED && after !== before && after.goal?.status === GOAL_STATUS.ACTIVE) this.#completedControls.delete(key)
     this.syncPlanningState(key)
     return after
   }
@@ -1254,10 +1316,47 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     return claimed
   }
 
+  spendGoalEffort(key, blocker) {
+    const before = this.planningState(key)
+    const after = this.dispatchPlanningEvent(key, { type: PLANNING_EVENT.GOAL_EFFORT_SPENT, source: 'runtime',
+      goal_id: before?.goal?.goal_id, blocker, now: Date.now() })
+    return after !== before
+  }
+
+  creditNativeProgress(key, plan, step, facts) {
+    return this.dispatchPlanningEvent(key, { type: PLANNING_EVENT.GOAL_NATIVE_PROGRESS, source: 'runtime',
+      plan_id: plan.plan_id, step_id: step.step_id, facts, now: Date.now() })
+  }
+
+  reviseWorkingPlan(key, draft, { current, requestId, nativeIdle }) {
+    const before = this.planningState(key); const prior = getActivePlan(before)
+    const grant = this.currentGoalGrant(key)
+    if (!grant || !prior) return { ok: false, reason: 'current_grant_missing' }
+    const grantCheck = { ...current, grant_id: grant.grant_id, grant_revision: grant.revision }
+    const after = applyPlanningEvent(before, { type: PLANNING_EVENT.WORKING_PLAN_REVISED, source: 'runtime',
+      plan_id: prior.plan_id, plan_version: prior.plan_version, step_id: prior.steps[prior.active_step_index]?.step_id,
+      steps: proposalSteps(draft.plan, draft.stepCompletions, 0, draft.executionGuidance),
+      native_idle: nativeIdle, runtime_validation: { passed: true }, grant_check: grantCheck,
+      request_id: requestId, now: Date.now() })
+    if (after === before) return { ok: false, reason: 'working_revision_fenced' }
+    const successor = getActivePlan(after)
+    const committed = applyPlanningEvent(after, { type: PLANNING_EVENT.PLAN_COMMITTED, source: 'runtime',
+      plan_id: successor.plan_id, runtime_validation: { passed: true, scope: 'completion_contracts' },
+      grant_check: grantCheck, now: Date.now() })
+    if (getActivePlan(committed)?.status !== PLAN_STATUS.COMMITTED) return { ok: false, reason: 'working_revision_commit_refused' }
+    const legacy = this.planByNpc.get(key)
+    if (!legacy) return { ok: false, reason: 'working_revision_legacy_missing' }
+    this.planningByNpc.set(key, committed)
+    legacy.plan = [...draft.plan]; legacy.current_step = 0; legacy.status = 'active'
+    legacy.task_board = createTaskBoard(draft.plan, 0, { goalId: before.goal.goal_id, now: Date.now() })
+    this.syncPlanningState(key, legacy)
+    return { ok: true, plan: getActivePlan(committed), state: committed }
+  }
+
   // One planner round per step after an executor review, durable across restarts.
   claimReviewContinuation(key, stepId, { now = Date.now(), requestId } = {}) {
     const before = this.planningState(key)
-    if (before?.goal?.status !== GOAL_STATUS.ACTIVE || typeof stepId !== 'string' || before.goal.review_continuation_steps?.includes(stepId)) return false
+    if (before?.goal?.status !== GOAL_STATUS.ACTIVE || typeof stepId !== 'string') return false
     const after = this.dispatchPlanningEvent(key, {
       type: PLANNING_EVENT.REVIEW_CONTINUATION_CLAIMED,
       source: 'runtime', goal_id: before.goal.goal_id, step_id: stepId, now,
@@ -1427,6 +1526,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     // exists. Otherwise the first slice can never be linked to the shelf it is
     // supposed to refine.
     this.planningByNpc.set(key, planning)
+    if (goalAdmitted && planning.goal?.status === GOAL_STATUS.ACTIVE) this.#completedControls.delete(key)
     if (Array.isArray(roadmap) && roadmap.length > 0) {
       planning = this.reviseRoadmap(key, roadmap, {
         now,
@@ -1513,6 +1613,13 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
 
     const validation = runtime_validation ?? runtimeValidation
     if (!validation || validation.passed !== true) return planning
+
+    const factoryUse = factoryUseDecision(this, key, plan.steps[plan.active_step_index])
+    if (!factoryUse.ok) {
+      const error = new Error(factoryUse.code)
+      error.code = factoryUse.code
+      throw error
+    }
 
     planning = applyPlanningEvent(planning, {
       type: PLANNING_EVENT.PLAN_COMMITTED,
@@ -1930,7 +2037,18 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         plan_id: plan.plan_id,
       }, requestId)
     }
-    if (verdict.ok) return verdict
+    if (verdict.ok) {
+      const factory = this.#factoryRegistry.admission(operations, { goal_id: planning?.goal?.goal_id, plan_id: plan?.plan_id,
+        request_id: requestId, actor_id: actor?.actor_id, actor_epoch: actor?.actor_epoch ?? actor?.epoch })
+      if (!factory.ok) this.#authTrace('admission.factory_cell_refused', { ...factory, plan_id: plan?.plan_id }, requestId)
+      if (factory.ok && !factory.lifecycle_transaction_id) {
+        const use = factoryUseDecision(this, key, plan?.steps?.[plan.active_step_index])
+        if (!use.ok) return { ok: false, code: use.code, refusal_class: 'world', stage: 'admission', operation_index: 0, operation: operations?.[0]?.name }
+        const resolved = factoryOperationUseDecision(this, key, operations, { requestId, actor })
+        if (!resolved.ok) return { ...resolved, refusal_class: 'world', stage: 'admission', operation_index: 0, operation: operations?.[0]?.name }
+      }
+      return factory
+    }
     const payload = {
       stage: 'admission',
       code: verdict.code,
@@ -2250,7 +2368,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const planning = this.planningState(key)
     const plan = getActivePlan(planning)
     const step = plan?.steps?.[plan.active_step_index]
-    const guard = conflictingOperation(planning, { operations, gatherRecoveryKey, planId: plan?.plan_id, stepId: step?.step_id })
+    const factoryLifecycleRecoveryKeys = this.#factoryRegistry.lifecycleResidualRetryKeys(operations, { goal_id: planning?.goal?.goal_id,
+      plan_id: plan?.plan_id, plan_version: plan?.plan_version, semantic_step_id: step?.semantic_step_id ?? step?.step_id, request_id: requestId })
+    const guard = conflictingOperation(planning, { operations, gatherRecoveryKey, factoryLifecycleRecoveryKeys, planId: plan?.plan_id, stepId: step?.step_id })
     if (guard.refuse) {
       const pending = this.pendingOperations(key).find(record => record.operation_key === guard.operation_key)
       this.#authTrace('operation.duplicate_suppressed', {
@@ -2288,6 +2408,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const event = { type: PLANNING_EVENT.STEP_CONTRACT_BOUND, now, source: 'runtime', plan_id: planId, step_id: stepId, contract, binding, request_id: requestId }
     const check = checkStepContractBind(planning, event)
     if (!check.ok) return refuse(check.reason)
+    const factoryUse = factoryUseDecision(this, key, { ...check.step, completion_contract: check.contract })
+    if (!factoryUse.ok) return refuse(factoryUse.code)
     const durable = safeDurableStepCompletionContract(check.contract, check.step)
     const alignment = boardPlanAlignment(legacy.task_board, check.plan)
     const boardIndex = alignment === undefined ? -1 : alignment + check.index
@@ -2490,6 +2612,35 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       plan_id: plan.plan_id,
       step_id: step.step_id,
     })
+  }
+
+  // A terminal control receipt is history, never an executable task or grant.
+  recordCompletedGoalControl(key, actor, now = Date.now()) {
+    const goal = this.planningByNpc.get(key)?.goal
+    const receipt = { version: 1, goal_id: goal?.goal_id, goal_status: goal?.status, completed_at: now,
+      actor_id: actor?.actor_id, actor_epoch: actor?.epoch, session_id: actor?.session }
+    if (this.#completedControlsFault !== undefined || !validCompletedControl(receipt)) return undefined
+    if (!this.#completedControls.has(key) && this.#completedControls.size >= 128) return undefined
+    const prior = this.#completedControls.get(key)
+    if (prior?.goal_id === receipt.goal_id) return structuredClone(prior)
+    this.#completedControls.set(key, receipt)
+    return structuredClone(receipt)
+  }
+
+  completedGoalControl(key) {
+    const held = this.#completedControls.get(key)
+    const goal = this.planningByNpc.get(key)?.goal
+    if (!held || this.#completedControlsFault !== undefined || goal && (goal.goal_id !== held.goal_id || goal.status !== 'completed')) return undefined
+    return structuredClone(held)
+  }
+
+  pauseCompletedGoalControl(key, expected, actor, now = Date.now()) {
+    const held = this.completedGoalControl(key)
+    if (!held || JSON.stringify(held) !== JSON.stringify(expected) || held.actor_id !== actor?.actor_id
+      || held.actor_epoch !== actor?.epoch || held.session_id !== actor?.session) return undefined
+    const paused = { ...held, operator_pause: { reason: 'user_stop', pause_class: 'operator', at: now } }
+    this.#completedControls.set(key, paused)
+    return structuredClone(paused)
   }
 
   retireCompletedPlan(key) {
@@ -2779,6 +2930,8 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       .filter(ref => typeof ref === 'string' && ref.trim())
     const before = this.planningByNpc.get(key)
     if (!before?.goal || refs.length === 0) return before
+    const enrollment = source === 'runtime' ? this.factoryGoalEnrollmentStatus(key) : undefined
+    if (enrollment?.required && !enrollment.enrolled) return before
     const after = this.dispatchPlanningEvent(key, {
       type: PLANNING_EVENT.GOAL_SATISFIED,
       now,
@@ -2929,6 +3082,14 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     }
 
     const step = plan.steps[plan.active_step_index]
+    try {
+      if (committedFactoryCellIntent(step) && !this.#factoryRegistry.read().cells.some(cell => cell.enrollment?.goal_id === plan.goal_id
+        && cell.enrollment.semantic_step_id === (step.semantic_step_id ?? step.step_id)
+        && cell.enrollment.intent_signature === factoryCellIntentSignature(step.execution_guidance))) return refuse('factory_enrollment_required')
+      const use = factoryUseDecision(this, key, step, { close: true })
+      if (!use.ok) return refuse(use.code)
+    }
+    catch { return refuse('factory_enrollment_unavailable') }
     const now = state.updated_at ?? Date.now()
     const events = this.#stepCloseEvents({ plan, step, candidate, decision, now })
     let simulated = planning
@@ -2979,6 +3140,12 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   applyOutcomeAuthority(key, candidate, options = {}) {
     const beforeLegacy = key ? this.planByNpc.get(key) : undefined
     if (beforeLegacy) this.ensurePlanningDraft(key, beforeLegacy, { now: beforeLegacy.updated_at })
+    if (candidate?.metadata?.scope !== 'step') {
+      const decision = validateOutcomeCandidate(candidate, { world: options?.world ?? {} })
+      const enrollment = decision.accepted && decision.durable_status === 'completed' ? this.factoryGoalEnrollmentStatus(key) : undefined
+      if (enrollment?.required && !enrollment.enrolled) return { state: beforeLegacy, changed: false,
+        decision: { ...decision, accepted: false, rejection_reason: enrollment.reason } }
+    }
     const stepClose = this.#decideStepClose(key, candidate, options)
     if (stepClose?.refused) return stepClose.refused
     const result = super.applyOutcomeAuthority(key, candidate, options)
@@ -3105,8 +3272,16 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     const snapshot = super.snapshot()
     return {
       ...snapshot,
+      agent_notebooks: this.notebooks.snapshot(),
+      ...(this.#completedControlsFault !== undefined ? { completed_goal_controls: structuredClone(this.#completedControlsFault) }
+        : this.#completedControls.size ? { completed_goal_controls: { version: 1, records: [...this.#completedControls.entries()] } } : {}),
+      ...this.#factoryRegistry.snapshot(),
+      ...this.#factoryUseRecovery.snapshot(),
+      factory_control_revision: this.#factoryControlRevision,
       ...(this.plannerSkillHandoffs?.size ? { planner_skill_handoffs: [...this.plannerSkillHandoffs.entries()].slice(0, 128) } : {}),
       production_tasks: [...(this.productionTasks ?? new Map()).entries()],
+      stock_dependency_barriers: [...(this.stockDependencyBarriers ?? new Map()).entries()],
+      ...(this.stockDependencyBarrierFault ? { stock_dependency_barrier_fault: true } : {}),
       gather_recoveries: [...(this.gatherRecoveries ?? new Map()).entries()],
       ...(this.gatherRecoveryFault ? { gather_recovery_fault: true } : {}),
       controller_recoveries: [...(this.controllerRecoveries ?? new Map()).entries()],
@@ -3247,6 +3422,23 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
   }
 
   restore(snapshot) {
+    this.#completedControls = new Map()
+    this.#completedControlsFault = undefined
+    const terminal = snapshot?.completed_goal_controls
+    if (terminal !== undefined) {
+      if (terminal?.version !== 1 || !Array.isArray(terminal.records) || terminal.records.length > 128
+        || terminal.records.some(row => !Array.isArray(row) || row.length !== 2 || typeof row[0] !== 'string' || !row[0] || row[0].length > 200 || !validCompletedControl(row[1]))
+        || new Set(terminal.records.map(row => row[0])).size !== terminal.records.length) this.#completedControlsFault = structuredClone(terminal)
+      else this.#completedControls = new Map(structuredClone(terminal.records))
+    }
+    this.notebooks.restore(snapshot?.agent_notebooks)
+    this.#factoryUseRecovery.restore(snapshot)
+    const controlRevision = snapshot.factory_control_revision ?? 0
+    if (!Number.isSafeInteger(controlRevision) || controlRevision < this.#factoryControlRevision) this.#factoryControlRevision = Number.MAX_SAFE_INTEGER
+    else this.#factoryControlRevision = controlRevision
+    this.#factoryRegistry.restore(snapshot, (event, data) => {
+      try { this.traceSink?.(event, data) } catch { /* Diagnostics never grant or revoke registry validity. */ }
+    })
     // Rehydrate contracts before the generic memory sanitization can discard
     // unknown fields. This is deliberately independent of the retired project
     // hierarchy: the Task Board remains the compatibility projection for a
@@ -3267,6 +3459,9 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
     )
     super.restore(snapshot)
     this.plannerSkillHandoffs = restorePlannerSkillHandoffs(snapshot?.planner_skill_handoffs)
+    const stockBarriers = restoreStockDependencyBarriers(snapshot?.stock_dependency_barriers)
+    this.stockDependencyBarriers = stockBarriers.records
+    this.stockDependencyBarrierFault = stockBarriers.fault || snapshot?.stock_dependency_barrier_fault === true
     const progressAudits = restoreProgressAudits(snapshot?.executor_progress_audits)
     this.progressAudits = progressAudits.records
     this.progressAuditFault = progressAudits.fault || snapshot?.executor_progress_audit_fault === true
@@ -3332,6 +3527,13 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
         if (restored.authorization || restored.task_ledger) goallessWorld.push([item.key, restored])
         continue
       }
+      if (restored.goal?.effort?.migration === 'legacy_retained_counts_no_credit') {
+        const ledger = snapshot.factory_use_recovery
+        const attempts = ledger?.records?.filter(row => row.goal_id === restored.goal.goal_id).reduce((sum, row) => sum + (row.attempts?.length ?? 0), 0) ?? 0
+        const ambiguous = ledger && (ledger.schema_version !== 1 || ledger.fault || !Array.isArray(ledger.records))
+        const total = restored.goal.effort.total + attempts
+        restored.goal.effort = { ...restored.goal.effort, total: ambiguous ? Math.max(24, total) : total, spent: ambiguous ? 24 : Math.min(24, total), ...(ambiguous ? { fault: true } : {}) }
+      }
       this.planningByNpc.set(item.key, restored)
     }
 
@@ -3347,6 +3549,7 @@ export class CanonicalTaskBoardMemory extends NpcDialogueMemory {
       if (planning) this.#convergeReducerToBoardEvidence(key, state)
       if (!planning) {
         planning = this.ensurePlanningDraft(key, state, { now: state.updated_at, migrated: true })
+        if (planning?.goal) planning.goal.effort = { version: 1, spent: 24, total: 24, peaks: {}, raw_peaks: {}, blockers: {}, credits: 0, fault: true, migration: 'legacy_board_effort_unknown' }
         // Not a fresh admission: this plan was admitted by a previous run and
         // is being reconstructed from disk through the deterministic admission
         // boundary used by live plans.

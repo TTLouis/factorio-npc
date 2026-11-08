@@ -1,6 +1,6 @@
 # Factorio NPC
 
-![Mode: external harness](https://img.shields.io/badge/mode-external%20harness-2563eb?style=flat-square)
+![Modes: external, plan, pursuit](https://img.shields.io/badge/modes-external%20%7C%20plan%20%7C%20pursuit-2563eb?style=flat-square)
 ![Status: experimental](https://img.shields.io/badge/status-experimental-d97706?style=flat-square)
 [![License: MIT](https://img.shields.io/badge/license-MIT-64748b?style=flat-square)](LICENSE)
 
@@ -57,14 +57,18 @@ It does not establish reliable completion of arbitrary gameplay goals.
 
 ## Choose your harness
 
-Choose how you want to control your NPC. Each branch has its own setup and
-experimental status.
+All three modes use one codebase on `main`, one native mod and shared world tools.
+Select a lifecycle at startup; no branch switch is needed.
 
-| Line | Branch | How it works |
-| --- | --- | --- |
-| External harness | [`main`](https://github.com/TTLouis/factorio-npc/tree/main) | Your external AI assistant plans and operates the NPC through MCP. |
-| Built-in harness: plan mode | [`feat/builtin-harness-plan`](https://github.com/TTLouis/factorio-npc/tree/feat/builtin-harness-plan) | An internal planner and executor follow committed plans and step contracts; Jev is optional. |
-| Built-in harness: pursuit mode | [`feat/builtin-harness-pursuit`](https://github.com/TTLouis/factorio-npc/tree/feat/builtin-harness-pursuit) | One internal operator model pursues the goal through tools, with a notebook and native goal evaluation. In development. |
+| Mode | How it works |
+| --- | --- |
+| `external` | Your external assistant plans and operates the NPC through stdio MCP. |
+| `plan` | Built-in planner and executor follow committed plans and step contracts; Jev is optional. |
+| `pursuit` | One built-in operator uses tools, a notebook and native goal evaluation with bounded continuation. |
+
+See [mode selection and setup](docs/HARNESS_MODES.md) for commands, requirements,
+compatibility entrypoints and the preserved safety boundaries. All modes remain
+experimental; historical evidence applies only to its recorded candidate.
 
 ---
 

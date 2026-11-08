@@ -48,9 +48,9 @@ This guidance does not authorize gameplay, tool expansion or another trial.
    Register ownership before creating a checkout; use its naming, source and
    integration rules. Those local files are not prerequisites for an independent
    contributor's clone. See [CONTRIBUTING.md](CONTRIBUTING.md).
-4. External-harness development and setup target `main`. The internal planner/Jev
-   experiment remains on `experiment/jev-agent-architecture`; keep that work
-   separate unless explicitly requested. Do not switch another session's branch.
+4. Shared external, plan and pursuit development targets `main`. Select the
+   lifecycle through [docs/HARNESS_MODES.md](docs/HARNESS_MODES.md), not a source
+   branch. Historical experiment refs remain evidence. Do not switch another session's branch.
 5. Keep one bounded task per branch. For substantial work, record owner, source
    SHA, dependencies, acceptance criteria and a resumable checkpoint using the
    [development workflow](docs/DEVELOPMENT_WORKFLOW.md).

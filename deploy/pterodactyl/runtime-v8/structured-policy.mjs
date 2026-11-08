@@ -1,10 +1,15 @@
+import { notebookToolDefinitions, isNotebookTool, validateNotebookTool } from './agent-notebook.mjs'
+import { knowledgeToolDefinitions, isKnowledgeTool, knowledgeToolCommand } from './knowledge-retrieval.mjs'
+import { machineDeliveryToolDefinition, isMachineDeliveryTool, validateMachineDeliveryBindingArgs } from './machine-delivery.mjs'
 import { worldEntityFactsDefinition, renderWorldEntityFacts } from './world-entity-tool.mjs'
 import * as base from '../staging/structured-policy.mjs'
 import { normalizeObservationRequest, TARGETED_OBSERVATION_GUIDANCE } from './targeted-observation.mjs'
 import { COMPLETION_CONTRACT_SCHEMA } from './step-completion.mjs'
+import { FACTORY_CELL_INTENT_SCHEMA } from './factory-cell-intent.mjs'
 import { PLANNER_REVIEW_RATIONALE_MAX_CHARS, PLANNER_SKILL_LOOKUP_TOOLS } from './role-contracts.mjs'
 import { PRODUCTION_TASK_SCHEMA, normalizeProductionIntent } from './production-task.mjs'
 import { HARNESS_DEFAULTS_SCHEMA } from './production-repair.mjs'
+import { factoryCellToolDefinitions, isFactoryCellTool, validateFactoryCellTool } from './factory-cell-tools.mjs'
 
 export * from '../staging/structured-policy.mjs'
 
@@ -1273,14 +1278,17 @@ export const plannerControlToolDefinitions = [{
                   id: { type: 'string', maxLength: 60 },
                   kind: {
                     type: 'string',
-                    enum: ['research_completed', 'rockets_launched', 'items_produced', 'machine_output_delivered', 'inventory_count', 'space_location_unlocked', 'entity_working', 'electric_network_satisfied', 'production_rate'],
-                    description: 'research_completed {technology}; rockets_launched {minimum}; items_produced {item_name, minimum} (force-wide total across all surfaces); machine_output_delivered {item_name, minimum} (new native furnace output in one exact newly placed chest; requires host arming before work and immutable explicit destination selection or completed exact deposit); inventory_count {item_name, minimum} (SGLuna\'s own inventory); space_location_unlocked {name} (Space Age planets/locations); entity_working {entity_name, minimum} (that many entities of the prototype working now); electric_network_satisfied {entity_name, minimum} (that many powered by a running producer, not short of power); production_rate {item_name, per_minute, window_minutes} (machine output per minute over the last 1 or 10 minutes, hand work excluded: any non-fuel hand insert, even into a chest, delays it by a window, and a hand-fed machine keeps it void until its hand-fed input is used up). Prove build/power/run goals with the running kinds or production_rate, never with items_produced.',
+                    enum: ['research_completed', 'rockets_launched', 'items_produced', 'machine_output_delivered', 'inventory_count', 'space_location_unlocked', 'entity_working', 'electric_network_satisfied', 'production_rate', 'automated_starter_base'],
+                    description: 'research_completed {technology}; rockets_launched {minimum}; items_produced {item_name, minimum} (force-wide total across all surfaces); machine_output_delivered {item_name, minimum} (new native furnace output in one exact newly placed chest; requires harness arming before work and immutable bindMachineDelivery selection or completed exact deposit); inventory_count {item_name, minimum} (SGLuna\'s own inventory); space_location_unlocked {name} (Space Age planets/locations); entity_working {entity_name, minimum} (that many entities of the prototype working now); electric_network_satisfied {entity_name, minimum} (that many powered by a running producer, not short of power); production_rate {item_name, per_minute, window_minutes} (machine output per minute over the last 1 or 10 minutes, hand work excluded: any non-fuel hand insert, even into a chest, delays it by a window, and a hand-fed machine keeps it void until its hand-fed input is used up). Prove build/power/run goals with the running kinds or production_rate, never with items_produced.',
                   },
                   technology: { type: 'string', maxLength: 100 },
                   item_name: { type: 'string', maxLength: 100 },
                   name: { type: 'string', maxLength: 100 },
                   minimum: { type: 'integer', minimum: 1 },
                   entity_name: { type: 'string', maxLength: 100 },
+                  science_item: { type: 'string', maxLength: 100 },
+                  supply_items: { type: 'array', minItems: 1, maxItems: 8, items: { type: 'string', maxLength: 100 } },
+                  construction_stocks: { type: 'array', minItems: 1, maxItems: 8, items: { type: 'object', additionalProperties: false, required: ['item_name', 'minimum'], properties: { item_name: { type: 'string', maxLength: 100 }, minimum: { type: 'integer', minimum: 1, maximum: 1000000 } } } },
                   per_minute: { type: 'number', exclusiveMinimum: 0, description: 'production_rate only: items per minute.' },
                   window_minutes: { type: 'integer', enum: [1, 10], description: 'production_rate only: the measured window, default 1.' },
                   countFrom: {
@@ -1293,6 +1301,9 @@ export const plannerControlToolDefinitions = [{
             },
           },
         },
+        workingPlanRevision: { type: 'boolean', enum: [true], description: 'Planner-only explicit revision of remaining working plan at a harness review boundary; preserve the user goal/acceptance and grant.' },
+        factoryReassignment: { type: 'object', additionalProperties: false, required: ['cell_id', 'product', 'resource'], properties: { cell_id: { type: 'string' }, product: { type: 'string' }, resource: { type: 'string' } }, description: 'Planner workingPlanRevision only: request validated reassignment of an empty unselected NPC-owned standalone furnace with no consumers. Live unique recipe and protection/custody fences apply; other transitions are refused.' },
+        starterBaseBindings: { type: 'object', description: 'Planner-only live facility binding for the already accepted automated_starter_base goal. members: at most 64 exact units; science:{producer,inserter,lab}; supplies:[{item_name,producer}]; stocks:[{item_name,producer,inserter,container}]. Direct producer-to-consumer native inserter links are currently required. This changes observation bindings, never targets or permissions.' },
         // LOD 1 guidance (roadmap 2 / 3). Deliberately NOT an object with steps
         // or operations: a shelf node says what should eventually be true and
         // why, and the runtime re-derives realization status from verified
@@ -1355,7 +1366,12 @@ export function plannerControlPayloadFromMessage(message) {
   let args
   try { args = JSON.parse(rawArgs) }
   catch { throw new base.PolicyError('submitPlan arguments must be valid JSON') }
-  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'observationRequest', 'assessmentOnly', 'checkpoint', 'stepCompletions', 'semanticCompletion', 'roadmapNodeIds', 'developmentMode', 'roadmap', 'goal', 'timeReview', 'stepId', 'executionGuidance', 'plannerReview', 'productionTask', 'defaults'])
+  exactKeys(args, ['chatMessage', 'plan', 'currentStep', 'operations', 'observationRequest', 'assessmentOnly', 'checkpoint', 'stepCompletions', 'semanticCompletion', 'roadmapNodeIds', 'developmentMode', 'roadmap', 'goal', 'timeReview', 'stepId', 'executionGuidance', 'plannerReview', 'productionTask', 'defaults', 'workingPlanRevision', 'factoryReassignment', 'starterBaseBindings'])
+  check(args.workingPlanRevision === undefined || args.workingPlanRevision === true, 'submitPlan.workingPlanRevision must be true')
+  for (const [name, limit] of [['factoryReassignment', 1000], ['starterBaseBindings', 12000]]) {
+    const value = args[name]
+    check(value === undefined || value !== null && typeof value === 'object' && !Array.isArray(value) && JSON.stringify(value).length <= limit, `submitPlan.${name} must be a bounded object`)
+  }
   // An executor binds its operations to the committed active step by id; plan and currentStep are then not needed.
   const stepIdGiven = typeof args.stepId === 'string' && args.stepId.trim().length > 0
   check(args.stepId === undefined || stepIdGiven, 'submitPlan.stepId must be the active step id')
@@ -1381,6 +1397,11 @@ export function plannerControlPayloadFromMessage(message) {
     operations: args.operations,
     ...(args.productionTask !== undefined ? { productionTask: normalizeProductionIntent(args.productionTask) } : {}),
     ...(args.defaults !== undefined ? { defaults: args.defaults } : {}),
+    // Transport preserves declarations; the shared loop enforces planner role,
+    // review boundary, unchanged authority and native bindings before effects.
+    ...(args.workingPlanRevision !== undefined ? { workingPlanRevision: args.workingPlanRevision } : {}),
+    ...(args.factoryReassignment !== undefined ? { factoryReassignment: args.factoryReassignment } : {}),
+    ...(args.starterBaseBindings !== undefined ? { starterBaseBindings: args.starterBaseBindings } : {}),
     ...(args.executionGuidance !== undefined ? { executionGuidance: args.executionGuidance } : {}),
     ...(args.plannerReview !== undefined ? { plannerReview: args.plannerReview } : {}),
     ...(stepIdGiven ? { stepId: args.stepId.trim() } : {}),
@@ -1487,6 +1508,10 @@ const researchPathDefinition = {
 export const toolDefinitions = [
   worldEntityFactsDefinition,
   ...base.toolDefinitions,
+  ...knowledgeToolDefinitions,
+  machineDeliveryToolDefinition,
+  ...notebookToolDefinitions,
+  ...factoryCellToolDefinitions,
   ...reservationDefinitions,
   placementCandidatesDefinition,
   fluidSourceTilesDefinition,
@@ -1510,7 +1535,7 @@ export const toolDefinitions = [
 
 // Open typed requests may name any ordinary observation. This schema is shared
 // across phases; the runtime still restricts closed requests to targeted facts.
-plannerControlToolDefinitions[0].function.parameters.properties.observationRequest.properties.tool.enum = toolDefinitions.map(tool => tool.function.name)
+plannerControlToolDefinitions[0].function.parameters.properties.observationRequest.properties.tool.enum = toolDefinitions.map(tool => tool.function.name).filter(name => !isNotebookTool(name) && !isMachineDeliveryTool(name))
 
 export const providerToolDefinitions = [
   ...toolDefinitions,
@@ -1568,6 +1593,7 @@ planningOnly.parameters.properties.executionGuidance = {
     rationale: { type: 'string', minLength: 1, maxLength: 240 },
     constraints: { type: 'array', maxItems: 3, items: { type: 'string', minLength: 1, maxLength: 100 } },
     skillIds: { type: 'array', maxItems: 3, items: { type: 'string', minLength: 1, maxLength: 120 } },
+    cellIntent: FACTORY_CELL_INTENT_SCHEMA,
     materialSupply: { description: 'Explicit method for the step resource, or null for other work. A skill alone does not mandate a layout. Explain setup/time savings in rationale.', anyOf: [
       { type: 'null' },
       { type: 'object', additionalProperties: false, required: ['mode', 'resource'], properties: {
@@ -1600,6 +1626,8 @@ export const executionOnlyProviderToolDefinitions = [
 ]
 
 const OBSERVATION_TOOL_FAMILY = Object.freeze({
+  listFactoryCells: 'entity_status',
+  inspectFactoryCell: 'entity_status',
   getActorStatus: 'runtime_status',
   getTaskStatus: 'runtime_status',
   getNavigationStatus: 'runtime_status',
@@ -1620,6 +1648,8 @@ const OBSERVATION_TOOL_FAMILY = Object.freeze({
 
   discoverPrototypes: 'prototype_knowledge',
   getPrototypeDetails: 'prototype_knowledge',
+  findKnowledge: 'prototype_knowledge',
+  getKnowledgeDetails: 'prototype_knowledge',
   findSkills: 'prototype_knowledge',
   getSkillDetails: 'prototype_knowledge',
 
@@ -1672,6 +1702,8 @@ const OBSERVATION_TOOL_FAMILY = Object.freeze({
 // Every read still counts against Jev's budget, so an exhausted budget still
 // forces the next decision without tools.
 export const OBSERVATION_TOOL_TIER = Object.freeze({
+  listFactoryCells: 'fact',
+  inspectFactoryCell: 'fact',
   getActorStatus: 'fact',
   getTaskStatus: 'fact',
   getNavigationStatus: 'fact',
@@ -1721,6 +1753,8 @@ export const OBSERVATION_TOOL_TIER = Object.freeze({
   inspectConstructionIntent: 'discovery',
 
   getPlayerStatus: 'optional',
+  findKnowledge: 'optional',
+  getKnowledgeDetails: 'optional',
   findSkills: 'optional',
   getSkillDetails: 'optional',
 })
@@ -1739,7 +1773,7 @@ const OBSERVATION_TOOL_FAMILIES = Object.freeze([
   'construction_state',
 ])
 
-const observationToolNames = toolDefinitions.map(tool => tool?.function?.name).filter(Boolean)
+const observationToolNames = toolDefinitions.map(tool => tool?.function?.name).filter(name => name && !isNotebookTool(name) && !isMachineDeliveryTool(name))
 for (const name of observationToolNames) {
   check(Object.hasOwn(OBSERVATION_TOOL_FAMILY, name), `Observation tool ${name} has no relevance family`)
 }
@@ -1771,12 +1805,21 @@ export function observationToolTier(name) {
 }
 
 export function isObservationToolName(name) {
-  return typeof name === 'string'
+  return typeof name === 'string' && !isNotebookTool(name) && !isMachineDeliveryTool(name)
     && toolDefinitions.some(tool => tool?.type === 'function' && tool.function?.name === name)
 }
 
 export function toolCommand(name, args) {
   if (name === 'getWorldEntityFacts') return renderWorldEntityFacts(args)
+  if (isMachineDeliveryTool(name)) { validateMachineDeliveryBindingArgs(args); return null }
+  if (isNotebookTool(name)) { validateNotebookTool(name, args); return null }
+  if (isKnowledgeTool(name)) return knowledgeToolCommand(name, args)
+  if (isFactoryCellTool(name)) {
+    validateFactoryCellTool(name, args)
+    // Host-only observations have no RCON command. The trusted prepared hook
+    // is required; the base dispatcher refuses null commands if it is absent.
+    return null
+  }
   if (name === 'validateConstructionReservation') {
     exactKeys(args, ['goal_id', 'plan_id', 'x', 'y', 'width', 'height'])
     check(['x', 'y', 'width', 'height'].every(key => Number.isInteger(args[key])), 'Area coordinates and dimensions are required integers')

@@ -8,15 +8,15 @@ import * as staging from '../staging/structured-policy.mjs'
 const root = new URL('../../../', import.meta.url)
 const contract = JSON.parse(await readFile(new URL('contracts/factorio-tool-contract.json', root), 'utf8'))
 
-test('skill discovery maximum agrees across manifest, advertised schema, serializer and native boundary', async () => {
+test('canonical skill discovery has a consistent bounded projection inside the wider native compatibility API', async () => {
   const bounds = contract.tools.findSkills.argument_bounds.limit
-  assert.deepEqual(bounds, { minimum: 1, maximum: 10, default: 3 })
+  assert.deepEqual(bounds, { minimum: 1, maximum: 8, default: 5 })
   const schema = staging.toolDefinitions.find(tool => tool.function.name === 'findSkills').function.parameters.properties.limit
   assert.equal(schema.maximum, bounds.maximum)
   assert.equal(schema.default, bounds.default)
   for (const policy of [staging, runtime]) {
-    assert.match(policy.toolCommand('findSkills', { query: 'science', limit: 10 }), /,'science',10\)/)
-    assert.throws(() => policy.toolCommand('findSkills', { query: 'science', limit: 11 }))
+    assert.match(policy.toolCommand('findSkills', { query: 'science', limit: 8 }), /,'science',8\)/)
+    assert.throws(() => policy.toolCommand('findSkills', { query: 'science', limit: 9 }))
   }
   const native = await readFile(new URL('packages/autorio/src/skills.ts', root), 'utf8')
   assert.match(native, /MAX_SKILL_CARDS = 10/)
@@ -30,11 +30,11 @@ test('skill discovery maximum agrees across manifest, advertised schema, seriali
 
 test('fluid preservation projection and admission metadata remain native and versioned', async () => {
   const projection = contract.tools.getEntityGeometry.fluid_preservation_projection
-  assert.equal(projection.version, 3)
+  assert.equal(projection.version, 4)
   assert.equal(projection.storage_limit, 16)
   assert.equal(projection.connection_limit, 16)
   const knowledge = await readFile(new URL('packages/autorio/src/knowledge.ts', root), 'utf8')
-  assert.match(knowledge, /fluid_geometry_version: 3/)
+  assert.match(knowledge, new RegExp(`fluid_geometry_version: ${projection.version}\\b`))
   for (const field of projection.storage_fields.concat(projection.connection_fields)) assert.match(knowledge, new RegExp(`\\b${field}:`))
   const placement = await readFile(new URL('packages/autorio/src/placement_candidates.ts', root), 'utf8')
   const items = await readFile(new URL('packages/autorio/src/placement_preflight.ts', root), 'utf8')
@@ -69,6 +69,11 @@ function namesForSurface(definitions, surface) {
 }
 
 const toolSamples = {
+  bindMachineDelivery: { unit_number: 1 },
+  readNotebook: { scope: 'goal' },
+  updateNotebook: { scope: 'persistent', expectedRevision: 0, text: 'Recheck historical observations.' },
+  listFactoryCells: {},
+  inspectFactoryCell: { cell_id: 'cell-1' },
   validateConstructionReservation: { goal_id: 'goal-1', plan_id: 'plan-1', x: 2, y: 2, width: 4, height: 4 },
   getConstructionReservations: {},
   getReservationDesignInput: { reservation_id: 1, revision: 1 },
@@ -80,6 +85,8 @@ const toolSamples = {
   getRecipeDetails: { item_or_recipe: 'iron-plate' },
   discoverPrototypes: { capability: 'mining', resource_name: 'iron-ore' },
   getPrototypeDetails: { name: 'transport-belt' },
+  findKnowledge: { query: 'freshness', limit: 3 },
+  getKnowledgeDetails: { id: 'knowledge-rates-stocks-freshness' },
   findSkills: { query: 'early iron plate smelting', limit: 3 },
   getSkillDetails: { id: 'starter-smelting-row' },
   getPlayerStatus: { player_name: 'Louis' },
@@ -90,6 +97,7 @@ const toolSamples = {
   findLongRangeEntities: { name: 'iron-ore' },
   findNearestEnemy: {},
   getEntityStatus: { name: 'stone-furnace' },
+  getWorldEntityFacts: { request_id: 'parity-read', members: [{ unit_number: 1, name: 'stone-furnace', position: { x: 0, y: 0 }, surface_index: 1, force_index: 1 }] },
   getEntityGeometry: { unit_number: 1 },
   getLogisticsTopology: { unit_number: 1 },
   measureTransportThroughput: { kind: 'inserter_instance', unit_number: 1 },
@@ -150,6 +158,13 @@ test('runtime-v8 tool commands target the canonical Factorio remote interface/fu
   for (const name of namesForSurface(contract.tools, 'pterodactyl-runtime-v8')) {
     const expected = contract.tools[name]
     const command = runtime.toolCommand(name, toolSamples[name])
+    if (['host-observation', 'host-context'].includes(expected.execution)) {
+      assert.equal(command, null, `${name} must never expose an RCON marker`)
+      assert.equal(expected.host_handler, name === 'bindMachineDelivery' ? 'machine-delivery' : expected.execution === 'host-context' ? 'agent-notebook' : 'factory-cell-tools')
+      assert.equal(Object.hasOwn(expected, 'remote'), false)
+      assert.deepEqual(expected.surfaces, ['pterodactyl-runtime-v8'])
+      continue
+    }
     const [interfaceName, functionName] = expected.remote
     assert.match(command, new RegExp(`remote\\.call\\(["']${interfaceName}["']\\s*,\\s*["']${functionName}["']`), `${name} remote mapping drifted`)
   }
@@ -173,10 +188,13 @@ test('intentional runtime-only tools stay explicit without requiring symmetry ad
     .map(([name]) => name)
     .sort()
   assert.deepEqual(runtimeOnly, [
+    'bindMachineDelivery',
     'estimateProductionTime',
+    'findKnowledge',
     'findSkills',
     'getConstructionReservations',
     'getFluidSourceTiles',
+    'getKnowledgeDetails',
     'getLocalSpatialObservation',
     'getMapContext',
     'getMiningDetails',
@@ -186,10 +204,15 @@ test('intentional runtime-only tools stay explicit without requiring symmetry ad
     'getReservationDesignInput',
     'getResourceAmounts',
     'getSkillDetails',
+    'getWorldEntityFacts',
+    'inspectFactoryCell',
+    'listFactoryCells',
     'measureTransportThroughput',
     'planPlacement',
     'proposeConstructionLayout',
+    'readNotebook',
     'resumeConstructionLayout',
+    'updateNotebook',
     'validateConstructionPlan',
     'validateConstructionReservation',
   ])
@@ -267,10 +290,10 @@ test('submitPlan advertises exactly the fields its parser accepts', () => {
   const definition = runtime.plannerControlToolDefinitions
     .find(tool => tool.function.name === runtime.PLANNER_CONTROL_TOOL_NAME)
   const advertised = Object.keys(definition.function.parameters.properties).sort()
-  assert.deepEqual(advertised, ['assessmentOnly', 'chatMessage', 'checkpoint', 'currentStep', 'developmentMode', 'goal', 'observationRequest', 'operations', 'plan', 'roadmap', 'roadmapNodeIds', 'semanticCompletion', 'stepCompletions', 'stepId', 'timeReview'])
+  assert.deepEqual(advertised, ['assessmentOnly', 'chatMessage', 'checkpoint', 'currentStep', 'developmentMode', 'factoryReassignment', 'goal', 'observationRequest', 'operations', 'plan', 'roadmap', 'roadmapNodeIds', 'semanticCompletion', 'starterBaseBindings', 'stepCompletions', 'stepId', 'timeReview', 'workingPlanRevision'])
   assert.equal(advertised.includes('project'), false)
 
-  const sample = { observationRequest: { stepId: 's', tool: 'getInventoryItems', args: {}, rationale: 'Need current inventory.' }, assessmentOnly: true, chatMessage: 'x', plan: [], currentStep: 0, operations: [], roadmap: [], roadmapNodeIds: [], developmentMode: 'vertical', checkpoint: {}, semanticCompletion: { stepId: 'step_1' }, stepCompletions: [], stepId: 'step_1', goal: { scope: 'finite', summary: 'x', doneWhen: [{ kind: 'rockets_launched', minimum: 1 }] }, timeReview: { decision: 'keep_serial', reason: 'x' } }
+  const sample = { workingPlanRevision: true, factoryReassignment: { cell_id: 'cell', product: 'iron-plate', resource: 'iron-ore' }, starterBaseBindings: { members: [1], science: { producer: 1, inserter: 2, lab: 3 }, supplies: [{ item_name: 'iron-plate', producer: 4 }], stocks: [{ item_name: 'transport-belt', producer: 5, inserter: 6, container: 7 }] }, observationRequest: { stepId: 's', tool: 'getInventoryItems', args: {}, rationale: 'Need current inventory.' }, assessmentOnly: true, chatMessage: 'x', plan: [], currentStep: 0, operations: [], roadmap: [], roadmapNodeIds: [], developmentMode: 'vertical', checkpoint: {}, semanticCompletion: { stepId: 'step_1' }, stepCompletions: [], stepId: 'step_1', goal: { scope: 'finite', summary: 'x', doneWhen: [{ kind: 'rockets_launched', minimum: 1 }] }, timeReview: { decision: 'keep_serial', reason: 'x' } }
   for (const field of advertised) {
     assert.ok(Object.hasOwn(sample, field), `no parity sample for advertised field ${field}`)
     assert.doesNotThrow(() => runtime.plannerControlPayloadFromMessage({
@@ -285,6 +308,16 @@ test('submitPlan advertises exactly the fields its parser accepts', () => {
       }],
     }), `submitPlan advertises ${field} but its parser refuses it`)
   }
+})
+
+test('planner control transport preserves new declarations and rejects malformed modes', () => {
+  const transport = fields => runtime.plannerControlPayloadFromMessage({ content: '', tool_calls: [{ type: 'function',
+    function: { name: 'submitPlan', arguments: JSON.stringify({ plan: [], currentStep: 0, operations: [], ...fields }) } }] })
+  for (const fields of [{ workingPlanRevision: true }, { factoryReassignment: { cell_id: 'cell', product: 'iron-plate', resource: 'iron-ore' } }, { starterBaseBindings: { members: [1] } }]) {
+    const parsed = transport(fields)
+    for (const [key, value] of Object.entries(fields)) assert.deepEqual(parsed[key], value)
+  }
+  for (const fields of [{ workingPlanRevision: false }, { workingPlanRevision: null }, { factoryReassignment: null }, { starterBaseBindings: [] }]) assert.throws(() => transport(fields))
 })
 
 // The executor has its own submitPlan (same name): stepId and operations are required, plan and currentStep are not
@@ -378,4 +411,20 @@ test('getPlacementCandidates region is part of the manifest args, the runtime sc
   assert.match(command, /remote\.call\("autorio_tools","get_placement_candidates",\{.*region=\{shape='box'/)
   const agentSource = await readFile(new URL('packages/agent/src/llm/tools.ts', root), 'utf8')
   for (const key of contract.tools.getPlacementCandidates.args) assert.match(agentSource.slice(agentSource.indexOf('const placementCandidatesSchema')), new RegExp(`(^|\\s)${key}:`), `${key} missing from the agent schema`)
+})
+
+test('authored references have a separate native API and are explicit reads for both roles', async () => {
+  for (const name of ['findKnowledge', 'getKnowledgeDetails']) {
+    assert.equal(contract.tools[name].protocol3_role, 'planner-and-executor')
+    assert.equal(contract.tools[name].surface_policy, 'runtime-v8-only')
+    assert.ok(runtime.planningOnlyProviderToolDefinitions.some(tool => tool.function.name === name))
+    assert.ok(runtime.executionOnlyProviderToolDefinitions.some(tool => tool.function.name === name))
+    assert.equal(staging.toolDefinitions.some(tool => tool.function.name === name), false)
+    assert.match(runtime.toolCommand(name, toolSamples[name]), /autorio_references/)
+  }
+  assert.equal(runtime.toolDefinitions.find(tool => tool.function.name === 'findKnowledge').function.parameters.properties.limit.maximum,
+    contract.tools.findKnowledge.argument_bounds.limit.maximum)
+  assert.throws(() => runtime.toolCommand('findKnowledge', { query: 'freshness', limit: 11 }))
+  assert.throws(() => runtime.toolCommand('getKnowledgeDetails', { id: '../escape' }))
+  assert.throws(() => runtime.toolCommand('getKnowledgeDetails', { id: 'reference', lua: 'unrestricted' }))
 })
