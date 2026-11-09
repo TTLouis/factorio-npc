@@ -556,7 +556,7 @@ test('placement candidates are annotated with the same footprint rule external p
   const annotation = f.calls.at(-1)
   assert.ok(annotation.includes('{{4.25,0.25},{4.75,0.75}}'))
   // The candidate check and placement preflight must send one identical rule.
-  const rule = command => command.match(/local function external_footprint\(surface,box,own\).*?return nil,blockers end;/)?.[0]
+  const rule = command => command.match(/local function external_footprint\(surface,box,own,placed\).*?return nil,blockers end;/)?.[0]
   f.state.status.placement_no_clear_supported = true; f.onCommand = undefined
   await f.bridge.prepare({ name: 'place_entity', args: { entity_name: 'transport-belt', x: 6.5, y: 0.5 } }, 'run/rule')
   assert.ok(rule(annotation))
@@ -564,6 +564,12 @@ test('placement candidates are annotated with the same footprint rule external p
   // The NPC's hidden vision vehicle follows the actor and has no collision; the mod's own scans skip it, and so does this rule
   // (native line lane: a line under the actor was refused for "sgluna-npc-vision [car]").
   assert.ok(rule(annotation).includes('e.name~="sgluna-npc-vision"'))
+  // Trial 5: native placement collides only where collision layers overlap, so a tree stump (doodad layer) does not block a
+  // belt. Items on the ground and characters always block; an unknown placed prototype or unreadable mask blocks too.
+  assert.ok(rule(annotation).includes('if e.type=="item-entity" or e.type=="character" or not mask then return true end'))
+  assert.ok(rule(annotation).includes('if on and mask[k] then return true end'))
+  assert.ok(annotation.includes(`external_footprint(surface,box,nil,'transport-belt')`), 'the annotation checks against the candidate prototype')
+  assert.ok(f.calls.find(text => text.includes('exact_grid_required')).includes(`external_footprint(surface,f.world_box,nil,'transport-belt')`), 'place_entity checks against its own prototype')
 })
 
 test('candidate annotation fails visibly, never by dropping or inventing eligibility', async () => {
@@ -595,8 +601,8 @@ test('candidate annotation survives a transport failure and place_candidate shar
   f.preflight = { ok: false, code: 'placement_footprint_occupied' }
   await assert.rejects(f.bridge.prepare({ name: 'place_candidate', args: { candidate_set_id: 'placement-1', candidate_id: 'candidate-1' } }, 'run/fluid'))
   const preflight = f.calls.find(command => command.includes('external_candidate_unproven'))
-  assert.match(preflight, /local function external_footprint\(surface,box,own\)/)
-  assert.match(preflight, /local code,blockers=external_footprint\(surface,f\.world_box\)/)
+  assert.match(preflight, /local function external_footprint\(surface,box,own,placed\)/)
+  assert.match(preflight, /local code,blockers=external_footprint\(surface,f\.world_box,nil,n\)/)
 })
 
 // 2026-11-03 trial finding 1 (test-results/external-sonnet-redscience-20261103):
@@ -899,7 +905,7 @@ test('place_line preflight checks every tile with the external footprint rule an
   const command = f.calls.find(text => text.includes('autorio_preflight'))
   for (const fragment of ['"place_line"', 'limit=129', 'tile_index=i-1', 'preservation_nonfluid_output']) assert.ok(command.includes(fragment), fragment)
   // Trial 4r: only the line's re-check exempts the actor's own character (the runtime steps out of each tile before placing).
-  assert.ok(command.includes('local own=remote.call("sgluna_deployment","status").actor_id') && command.includes('external_footprint(surface,t.world_box,own)'))
+  assert.ok(command.includes('local own=remote.call("sgluna_deployment","status").actor_id') && command.includes(`external_footprint(surface,t.world_box,own,'transport-belt')`))
   assert.ok(command.includes('not (own and e.type=="character" and e.unit_number==own)'))
   f.preflight = { ok: false, code: 'line_placement_items_insufficient', placement_item: { item_name: 'transport-belt', count: 3, held_count: 1, required_count: 3 } }
   await assert.rejects(f.bridge.prepare(line, 'run/line'), error => error.details.native_code === 'line_placement_items_insufficient'

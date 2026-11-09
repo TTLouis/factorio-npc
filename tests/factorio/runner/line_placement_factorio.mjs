@@ -10,6 +10,8 @@
 //              ground item is not cleared and tiles 6-11 stay empty
 //   SHORTFALL  holding 3 belts, a 6-tile line is refused before it is sent with the exact item accounting; nothing changes
 //   BLOCKED    a ground item already on tile 2 refuses the whole line before it is sent, naming the tile and the item
+//   STUMP      a tree stump (a corpse whose collision layers miss the belt's) on tile 1 does not block: native placement allows the
+//              tile and the whole line completes (trial 5: stumps were refused as footprint blockers)
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -210,6 +212,24 @@ async function blocked() {
   console.log('PASS: BLOCKED - a ground item on tile 2 refused the whole line before sending, naming the tile and the item; a line under the actor was built after it stepped aside')
 }
 
+async function stump() {
+  await setHeld('transport-belt', 10)
+  const operation = { name: 'place_line', args: { entity_name: 'transport-belt', x: origin.x + 3, y: origin.y + 14, direction: 4, line_direction: 4, count: 3 } }
+  const tiles = tilesOf(operation.args)
+  const corpse = await lua(`local e=s.create_entity{name="tree-08-stump",position={${tiles[1].x},${tiles[1].y}}}; local n=0; local names={}; for k in pairs(e.prototype.collision_mask.layers) do n=n+1; names[#names+1]=k end; local belt={}; for k in pairs(prototypes.entity["transport-belt"].collision_mask.layers) do belt[#belt+1]=k end; rcon.print(helpers.table_to_json({ok=e.valid,type=e.type,layers=n,names=names,belt=belt,native=s.can_place_entity{name="transport-belt",position={${tiles[1].x},${tiles[1].y}},direction=defines.direction.east,force=a.force,build_check_type=defines.build_check_type.manual}}))`)
+  assert.equal(corpse.ok, true)
+  assert.equal(corpse.type, 'corpse')
+  // Engine fact at 2.1.24: the stump's only layer (doodad) is not one of the belt's layers.
+  assert.ok(list(corpse.names).length > 0 && !list(corpse.names).some(layer => list(corpse.belt).includes(layer)), JSON.stringify(corpse))
+  assert.equal(corpse.native, true, 'native placement allows a belt on a stump')
+  const { receipt } = await run(operation, 'line-stump')
+  assert.equal(receipt.state, 'completed', JSON.stringify(receipt).slice(0, 1500))
+  assert.equal(receipt.line_placement.placed_count, 3)
+  assertPlaced(receipt.line_placement, await entitiesAt(tiles), tiles, 'transport-belt', 4)
+  evidence.stump = { corpse, line: receipt.line_placement }
+  console.log('PASS: STUMP - a stump whose collision layers miss the belt layers did not block; native placement allowed the tile and the line completed')
+}
+
 try {
   await fs.mkdir(results, { recursive: true })
   connection = new Rcon(Number(arg('port')), arg('password'), 15000, { host: arg('host') })
@@ -232,6 +252,7 @@ try {
   await partial()
   await shortfall()
   await blocked()
+  await stump()
   assert.equal(forbiddenFetchCalls, 0)
   evidence.status = 'pass'
 }

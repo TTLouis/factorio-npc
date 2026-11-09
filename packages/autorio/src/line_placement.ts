@@ -5,6 +5,8 @@ import type { TaskBatchIdentity, TaskBatchReceipt } from './task_manager'
 import { reservation_intersection } from './area_reservations'
 import { resolve_recorded_entity } from './entity_reference'
 import { find_world_entities } from './npc_vision'
+import { collision_layers } from './placement_obstructions'
+import { protected_read } from './electric_facts'
 import { placement_item_preflight, planned_placement_footprint } from './placement_preflight'
 
 // Bounded straight-line placement for the external harness: one admitted operation places a run of transport belts or a
@@ -110,15 +112,28 @@ function blocker_summary(entity: LuaEntity): LineBlocker {
   }
 }
 
+// Native placement collides only where collision layers overlap (trial 5: a tree stump, a corpse on the doodad layer,
+// was refused as a belt blocker although the engine allows the belt). Items on the ground and characters always count;
+// an unknown placed prototype or an unreadable mask counts too, so the rule fails closed.
+function footprint_blocker(entity: LuaEntity, placed: Record<string, boolean> | undefined) {
+  if (entity.type === 'item-entity' || entity.type === 'character' || placed === undefined) return true
+  const layers = collision_layers(entity.prototype)
+  if (layers === undefined) return true
+  for (const [layer, enabled] of pairs(layers)) if (enabled && placed[layer] === true) return true
+  return false
+}
+
 // The external footprint rule (see EXTERNAL_FOOTPRINT_SCAN_LIMIT): a refusal code and up to eight named blockers. The line
 // preflight passes the actor's own character, which the placing runtime steps out of before each tile (trial 4r: a line
 // starting where the previous one ended was refused for the actor standing on its own tile 0).
-export function external_footprint(surface: LuaSurface, box: BoundingBox, own_character?: LuaEntity) {
+export function external_footprint(surface: LuaSurface, box: BoundingBox, placed_name: string, own_character?: LuaEntity) {
+  const placed = protected_read(() => collision_layers(prototypes.entity[placed_name]))
   const found = find_world_entities(surface, { area: box, limit: EXTERNAL_FOOTPRINT_SCAN_LIMIT })
   if (found.length >= EXTERNAL_FOOTPRINT_SCAN_LIMIT) return { code: 'placement_footprint_dense', blockers: [] as LineBlocker[] }
   const blockers: LineBlocker[] = []
   for (const entity of found) {
-    if (entity.valid && entity.type !== 'resource' && entity !== own_character && blockers.length < LINE_PLACEMENT_LIMITS.blockers) blockers.push(blocker_summary(entity))
+    if (entity.valid && entity.type !== 'resource' && entity !== own_character && blockers.length < LINE_PLACEMENT_LIMITS.blockers
+      && footprint_blocker(entity, placed)) blockers.push(blocker_summary(entity))
   }
   return blockers.length > 0 ? { code: 'placement_footprint_occupied', blockers } : { code: undefined, blockers }
 }
@@ -158,7 +173,7 @@ export function line_placement_preflight(actor: ControlledActor | undefined, arg
       force: actor!.force, build_check_type: defines.build_check_type.manual })) {
       return { ok: false, code: 'placement_not_clear', tile_index: index, planned_footprint }
     }
-    const checked = external_footprint(surface, footprint.world_box, actor!.character)
+    const checked = external_footprint(surface, footprint.world_box, line.entity_name, actor!.character)
     if (checked.code !== undefined) return { ok: false, code: checked.code, tile_index: index, blockers: checked.blockers, planned_footprint }
     tiles.push({ index, position: footprint.position, world_box: footprint.world_box })
   }
@@ -235,7 +250,7 @@ export function line_node_precheck(actor: ControlledActor, line_node: LineNode |
     || !integer_in(line_node.index, 0, record.count - 1)) return { code: 'line_node_unproven' as const, blockers: [] as LineBlocker[] }
   const tile = line_tile({ x: record.origin.x, y: record.origin.y, line_direction: record.line_direction, spacing: record.spacing }, line_node.index)
   if (tile.x !== position.x || tile.y !== position.y) return { code: 'line_node_unproven' as const, blockers: [] as LineBlocker[] }
-  const checked = external_footprint(actor.surface, world_box)
+  const checked = external_footprint(actor.surface, world_box, entity_name)
   if (checked.code !== undefined) return { code: checked.code as 'placement_footprint_occupied' | 'placement_footprint_dense', blockers: checked.blockers }
   return undefined
 }
