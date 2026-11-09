@@ -22,7 +22,10 @@ import { placement_item_preflight, planned_placement_footprint } from './placeme
 // Only the external bridge calls this; the internal planner catalog does not expose it.
 
 export const LINE_PLACEMENT_PROTOTYPES = ['transport-belt', 'small-electric-pole']
-export const LINE_PLACEMENT_LIMITS = { count: 32, spacing: 8, history: 32, blockers: 8, coordinate: 1000000 }
+// history must be at least ADMISSION_LIMITS.history: a line's record is its completion evidence, so it may not be evicted
+// while its admission is still retained (Sol review: the 33rd line made the first one's receipt uncertain and fenced
+// submissions). Not imported, to avoid a module cycle; the external contract test pins the relation.
+export const LINE_PLACEMENT_LIMITS = { count: 32, spacing: 8, history: 64, blockers: 8, coordinate: 1000000 }
 // The external footprint rule, mirrored from the bridge's FOOTPRINT_RULE_LUA (tools/external-harness/native-bridge.mjs):
 // any non-resource entity in the footprint blocks, including items on the ground and characters; 129 or more entities is
 // too dense to inspect. A source parity test keeps the two definitions equal.

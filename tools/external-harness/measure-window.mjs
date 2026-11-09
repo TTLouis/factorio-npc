@@ -89,13 +89,17 @@ export async function measureWindow({ rcon, speed = 8, ticks = 72000, items = DE
   const last = after.measurement?.last
   const restored = after.speed === 1 && !after.measurement?.lease && last?.measurement_id === measurementId
   const actual = restored ? last.actual_ticks : null
-  const minutes = actual ? actual / 3600 : null
+  // The statistics are read before arming and after restoration, so their deltas cover before.tick..after.tick, which
+  // includes a few 1x ticks either side of the lease (Sol review). Rates use that interval; both are reported.
+  const statsTicks = restored && Number.isSafeInteger(after.tick) && Number.isSafeInteger(before.tick) ? after.tick - before.tick : null
+  const minutes = statsTicks > 0 ? statsTicks / 3600 : null
   const researchedBefore = new Set(before.researched ?? [])
   const result = {
     ok: restored, measurement_id: measurementId, requested: { speed, ticks }, restored_to_1x: restored,
     reason: last?.reason ?? null, valid_window: restored && last.reason === 'window_complete' && actual >= ticks && !watchdog,
     native: restored ? { start_tick: last.start_tick, end_tick: last.end_tick, restored_tick: last.restored_tick, actual_ticks: actual, native_checks: last.native_checks } : null,
     game_time_s: actual ? Math.round(actual / 60 * 1000) / 1000 : null, wall_ms: wallMs,
+    rate_interval: statsTicks ? { from_tick: before.tick, to_tick: after.tick, ticks: statsTicks, outside_lease_ticks: actual ? statsTicks - actual : null } : null,
     observed_speed: actual ? Math.round(actual / 60 / (wallMs / 1000) * 100) / 100 : null, host_watchdog_fired: watchdog,
     items: minutes ? delta(before.items, after.items, minutes) : null, fluids: minutes ? delta(before.fluids, after.fluids, minutes) : null,
     research: { completed_during_window: (after.researched ?? []).filter(name => !researchedBefore.has(name)), before: before.research, after: after.research },

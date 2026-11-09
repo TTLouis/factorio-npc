@@ -90,6 +90,11 @@ test('external-only line placement agrees with the bridge and the native mod', (
   const mod = readFileSync(new URL('../../packages/autorio/src/line_placement.ts', import.meta.url), 'utf8')
   assert.match(mod, new RegExp(`count: ${external.limits.line_count}, spacing: ${external.limits.line_spacing}, history: \\d+, blockers: ${external.limits.footprint_blockers},`))
   assert.equal(Number(mod.match(/EXTERNAL_FOOTPRINT_SCAN_LIMIT = (\d+)/)?.[1]), external.limits.footprint_scan)
+  // A completed line's record must outlive its admission, or an old line's receipt turns uncertain and fences submissions.
+  const admission = readFileSync(new URL('../../packages/autorio/src/operation_admission.ts', import.meta.url), 'utf8')
+  const lineHistory = Number(mod.match(/LINE_PLACEMENT_LIMITS = \{[^}]*history: (\d+)/)?.[1])
+  const admissionHistory = Number(admission.match(/ADMISSION_LIMITS = \{[^}]*history: (\d+)/)?.[1])
+  assert.ok(Number.isSafeInteger(admissionHistory) && lineHistory >= admissionHistory, `line history ${lineHistory} >= admission history ${admissionHistory}`)
   assert.ok(mod.includes(`LINE_PLACEMENT_PROTOTYPES = [${LINE_PROTOTYPES.map(name => `'${name}'`).join(', ')}]`))
   const bridge = readFileSync(new URL('../../deploy/pterodactyl/runtime-v8/operator-native-bridge.mjs', import.meta.url), 'utf8')
   assert.ok(bridge.includes(`limit=${external.limits.footprint_scan}}); if #found>=${external.limits.footprint_scan} then`))

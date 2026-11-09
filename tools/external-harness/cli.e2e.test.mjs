@@ -345,6 +345,8 @@ test('CLI abrupt death after admission leaves its write-ahead fence and exclusiv
   // EX_TEMPFAIL lets the process adapter report state_locked without reading stderr.
   assert.deepEqual(await locked.exit, { code: 75, signal: null })
   assert.match(locked.stderr(), /state_locked/)
+  // Sol review: the adapter spawns this entrypoint, so the holder line must come from it (pid of the killed owner).
+  assert.match(locked.stderr(), /^SGLUNA_STATE_LOCK_HOLDER \{.*"pid":\d+/m)
   assert.equal(locked.stdout(), '')
   assert.equal(f.engine.mutations(), 1)
   // Test operator recovery: original process has exited and competing startup
