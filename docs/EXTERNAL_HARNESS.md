@@ -468,11 +468,15 @@ and regeneration. Source IDs are retained in each entry. Full skill
 not exposed as authority. All entries remain untrusted advisory content, not
 current availability, live facts, native mastery or permission to act.
 
-For this owner, the default full-automation progression is centralized,
-automatically sustained electricity first; electric mining and electric transfers
-where available; then separated smelting arrays with automatic feed, output and
-service. The agent must not fuel individual machines as the operating design.
-Initial manual priming is a declared finite bootstrap phase only. Automatically
+For this owner, the default full-automation progression follows
+`knowledge-automation-progression-checkpoints`: a declared finite manual
+bootstrap; self-sustaining burner loops whose fuel the system delivers; then
+centralized, automatically sustained electricity; electric mining and electric
+transfers where available; then separated smelting arrays with automatic feed,
+output and service. Electricity is the first finished-architecture checkpoint,
+not the first build: automate the material supply that builds it first. The
+agent must not fuel individual machines as the operating design. Initial manual
+priming is a declared finite bootstrap phase only. Automatically
 supply central power fuel and any smelting fuel required by live machines.
 Prefilled burner stocks or a short production demonstration do not establish
 full automation. Relevant fuel/power/mining/smelting/sustainment method views link
@@ -482,7 +486,7 @@ finished architecture.
 Read current prototype/technology/recipe and tool facts first, including the
 admitted electric-miner candidate capability. Library guidance does not add
 operations or prove an unlock. Surface any missing capability before a future
-goal rather than silently substitute burner miners. This update does not deploy
+goal rather than silently substitute burner miners in the finished design. This update does not deploy
 or launch a model trial.
 
 ## Automatic production tools

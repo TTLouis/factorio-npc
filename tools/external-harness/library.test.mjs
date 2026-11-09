@@ -155,7 +155,8 @@ test('actual process adapter reads the library from a fake read-only backend wit
   const code = `import {startMcpServer} from ${JSON.stringify(serverUrl)}; import {readLibrary} from ${JSON.stringify(libraryUrl)};
 const runtime=Object.fromEntries(['bindMachineDelivery','capabilities','context','observe','submit','get','cancel','resume'].map(key=>[key,()=>{throw new Error('world forbidden')} ]));runtime.library=readLibrary;await startMcpServer({runtime}).done;`
   await withMcpClient(async client => {
-    assert.match(client.initialize.result.instructions, /electricity FIRST/)
+    assert.match(client.initialize.result.instructions, /self-sustaining burner loops whose fuel the system delivers/)
+    assert.match(client.initialize.result.instructions, /first finished-architecture checkpoint, not the first build/)
     const r = await client.request('tools/call', { name: 'factorio_library', arguments: { kind: 'skill', action: 'search', query: 'electricity' } })
     assert.equal(r.result.structuredContent.results[0].id, 'steam-power-bootstrap')
     assert.equal(r.result.isError, false)
