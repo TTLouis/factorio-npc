@@ -567,6 +567,27 @@ for the caller to check before claiming a production connection. Manual input de
 or handcrafting the final product does not prove a fully automatic production
 chain; a run must freeze and verify its own acceptance window and provenance.
 
+### Accelerated hands-off measurement (supervisor only)
+
+`tools/external-harness/measure-window.mjs` measures an unattended window faster
+than real time. It is not an MCP tool; the supervisor runs it after the operator
+stops making calls, with the NPC idle and zero humans connected:
+
+```bash
+node tools/external-harness/measure-window.mjs --evidence <new dir> --speed 8 --ticks 72000
+```
+
+It reads force production statistics, research state and the actor inventory at
+1×, then arms the mod's `sgluna_measurement_sprint` window. The engine restores
+1× itself at the end tick, or earlier when a human joins, the actor changes or is
+damaged, an enemy comes near, native work starts or the speed changes. A host
+watchdog ends a window that has not finished within its 1× duration plus two
+minutes. While the window runs the bridge refuses operator actions
+(`nonstandard_game_speed`). The result is valid only when `reason` is
+`window_complete`; rates are per game minute from actual native ticks, and
+`observed_speed` is game time over wall time. Speed is limited to 2–16× and a
+window to 108,000 ticks. Each measurement id can be used once.
+
 ## Interruption, cancellation and restart
 
 1. Save the `request_id`, `operation_id`, accepted semantic step and last observed

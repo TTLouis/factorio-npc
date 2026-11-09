@@ -151,6 +151,7 @@ lane_offset() {
     crash-site) printf '37' ;;
     line-placement) printf '38' ;;
     external-ground-pickup) printf '39' ;;
+    measurement-window) printf '40' ;;
     tick-sprint) printf '33' ;;
     *) printf '[npc-test] Unknown lane requested: %s\n' "$1" >&2; return 2 ;;
   esac

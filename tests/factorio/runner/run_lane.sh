@@ -164,14 +164,18 @@ case "$LANE" in
     ;;
   line-placement)
     # External-harness place_line through the shipped NativeBridge: belt run, pole line, mid-line partial and refusals.
-    printf '[npc-test][line-placement] Running belt, pole, partial, shortfall and blocked-tile gates...
-'
+    printf '[npc-test][line-placement] Running belt, pole, partial, shortfall and blocked-tile gates...\n'
     run_node line_placement_factorio.mjs
     ;;
   external-ground-pickup)
     # External-harness pick_up_ground_items through the shipped NativeBridge: pickup, unblocking a belt tile and refusals.
     printf '[npc-test][external-ground-pickup] Running pickup, unblock, empty-box and full-inventory gates...\n'
     run_node external_pickup_factorio.mjs
+    ;;
+  measurement-window)
+    # Supervisor-only accelerated hands-off window: end-tick restore, operator fence, early end and id reuse.
+    printf '[npc-test][measurement-window] Running window, fence, early-end and reuse gates...\n'
+    run_node measurement_window_factorio.mjs
     ;;
   tick-sprint)
     run_node tick_sprint_factorio.mjs --phase prepare --save "$SAVE"

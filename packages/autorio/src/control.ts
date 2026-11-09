@@ -64,6 +64,7 @@ import { register_area_reservations } from './area_reservation_ui'
 import { reservation_preflight, reserve_area } from './area_reservations'
 import { TaskStates } from './types'
 import { new_tick_sprint_guard } from './e2e_tick_sprint'
+import { new_measurement_sprint_guard } from './measurement_sprint'
 import { direction_towards } from './utils/direction'
 import { get_actor_inventory_items } from './utils/inventory'
 import { find_world_entities } from './npc_vision'
@@ -89,6 +90,14 @@ remote.add_interface('sgluna_tick_sprint', {
   seal: (reason: string) => tick_sprint.seal(reason),
   fail: (reason: string) => tick_sprint.fail(reason),
   safety_event: (reason: string) => tick_sprint.safety(reason),
+})
+const measurement_sprint = new_measurement_sprint_guard(peek_controlled_actor, () => task_manager.get_status_snapshot(),
+  () => remote.call('sgluna_deployment', 'status') as { allowed?: boolean, actor_id?: number, epoch?: number, connected_players?: number },
+  () => tick_sprint.status())
+remote.add_interface('sgluna_measurement_sprint', {
+  arm: (lease: Parameters<typeof measurement_sprint.arm>[0]) => measurement_sprint.arm(lease),
+  finish: (reason: string, measurement_id?: string) => measurement_sprint.finish(reason, measurement_id),
+  status: () => measurement_sprint.status(),
 })
 register_area_reservations(peek_controlled_actor, () => task_manager.player_state.task_state === TaskStates.IDLE)
 type Admission = typeof operation_admission
@@ -851,13 +860,14 @@ function sweep_npc_vision(reason: string) {
 }
 
 script.on_init(() => { initialize_fluid_preservation_history(); sweep_npc_vision('on_init') })
-script.on_event(defines.events.on_player_created, () => tick_sprint.safety('player_created'))
+script.on_event(defines.events.on_player_created, () => { tick_sprint.safety('player_created'); measurement_sprint.safety('player_created') })
 script.on_event(defines.events.on_entity_damaged, event => {
-  if (event.entity.unit_number === peek_controlled_actor()?.character?.unit_number) tick_sprint.safety('actor_damaged')
+  if (event.entity.unit_number === peek_controlled_actor()?.character?.unit_number) { tick_sprint.safety('actor_damaged'); measurement_sprint.safety('actor_damaged') }
 })
 script.on_configuration_changed(() => {
   if (task_manager.player_state.task_state === TaskStates.PREPARING_PUMP_SITE) task_manager.cancel_all_tasks('pump_site_configuration_changed')
   invalidate_pump_preparation_proposals()
+  measurement_sprint.safety('configuration_changed')
   sweep_npc_vision('on_configuration_changed')
 })
 
@@ -873,6 +883,7 @@ let no_actor_found = false
 script.on_event(defines.events.on_tick, (_event) => {
   task_manager.initialize()
   tick_sprint.tick()
+  measurement_sprint.tick()
   if (!setup_complete) setup()
   tick_output_delivery_proofs()
   tick_starter_acceptance()

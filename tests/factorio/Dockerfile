@@ -47,6 +47,7 @@ COPY --from=build /src/deploy/pterodactyl/staging /test/pterodactyl/staging
 COPY --from=build /src/deploy/pterodactyl/runtime-v8 /test/pterodactyl/runtime-v8
 # The external-harness bridge in its repository-relative layout, for lanes that drive it end to end.
 COPY --from=build /src/tools/external-harness/native-bridge.mjs /test/external-harness/tools/external-harness/native-bridge.mjs
+COPY --from=build /src/tools/external-harness/measure-window.mjs /test/external-harness/tools/external-harness/measure-window.mjs
 COPY --from=build /src/deploy/pterodactyl/staging /test/external-harness/deploy/pterodactyl/staging
 COPY --from=build /src/deploy/pterodactyl/runtime-v8 /test/external-harness/deploy/pterodactyl/runtime-v8
 COPY tests/factorio/runner /test/runner
