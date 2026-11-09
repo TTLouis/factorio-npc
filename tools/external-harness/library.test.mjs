@@ -18,7 +18,7 @@ const everyEntry = [...pack.knowledge, ...pack.skills]
 
 test('library reads the leveled export: schema 2, asserted counts, unique valid ids, resolvable related ids', () => {
   assert.equal(pack.schema, 2)
-  assert.deepEqual({ knowledge: pack.knowledge.length, skills: pack.skills.length }, LIBRARY_COUNTS)
+  assert.deepEqual({ knowledge: pack.knowledge.length, skills: pack.skills.length, stages: pack.stages.length }, LIBRARY_COUNTS)
   const ids = new Set(everyEntry.map(entry => entry.id))
   assert.equal(ids.size, everyEntry.length)
   for (const entry of everyEntry) {
@@ -83,6 +83,36 @@ test('progression checkpoints knowledge is discoverable and linked from the rela
   for (const related of ['burner-coal-loop', 'steam-power-bootstrap', 'skill-prove-sustainment']) {
     assert.ok(entry.related_ids.includes(related))
     assert.ok((await readLibrary({ kind: 'skill', action: 'get', id: related })).entry.related_ids.includes(id))
+  }
+})
+
+// Game stages are a knowledge sub-category: ordered records, methods by id, no stored numbers.
+test('stage category lists ordered game stages and each stage names existing methods', async () => {
+  const listed = await readLibrary({ kind: 'knowledge', action: 'search', category: 'stage' })
+  assert.deepEqual(listed.results.map(row => row.id), ['stage-manual-bootstrap', 'stage-burner-loops', 'stage-central-electricity',
+    'stage-electric-mining-transfers', 'stage-smelting-arrays', 'stage-sustained-consumption'])
+  assert.deepEqual(listed.results.map(row => row.order), [1, 2, 3, 4, 5, 6])
+  assert.ok(listed.results.every(row => row.category === 'stage' && row.kind === 'knowledge'))
+  const ids = new Set(everyEntry.map(entry => entry.id))
+  for (const stage of pack.stages) {
+    assert.ok(stage.methods.every(id => ids.has(id)), stage.id)
+    assert.doesNotMatch(JSON.stringify({ ...stage, methods: undefined }), /\d|bper (?:second|minute|tick)b/i, stage.id)
+    assert.ok(!ids.has(stage.id))
+  }
+  const burner = (await readLibrary({ kind: 'knowledge', action: 'get', id: 'stage-burner-loops' })).entry
+  assert.equal(burner.previous, 'stage-manual-bootstrap')
+  assert.equal(burner.next, 'stage-central-electricity')
+  assert.ok(burner.methods.some(row => row.id === 'burner-coal-loop' && row.kind === 'skill'))
+  assert.match(burner.reached_when.join(' '), /no agent action/)
+  const electricity = (await readLibrary({ kind: 'knowledge', action: 'search', category: 'stage', query: 'electricity', limit: 1 })).results[0]
+  assert.equal(electricity.id, 'stage-central-electricity')
+  assert.match(electricity.summary, /not the first build/)
+  // Plain knowledge search reaches stage records too; skills never do.
+  assert.ok((await readLibrary({ kind: 'knowledge', action: 'search', query: 'coal loop' })).results.some(row => row.id === 'stage-burner-loops'))
+  await assert.rejects(readLibrary({ kind: 'skill', action: 'get', id: 'stage-burner-loops' }), { code: 'library_entry_not_found' })
+  for (const input of [{ kind: 'skill', action: 'search', category: 'stage' }, { kind: 'knowledge', action: 'search', category: 'era' },
+    { kind: 'knowledge', action: 'get', id: 'stage-burner-loops', category: 'stage' }, { kind: 'knowledge', action: 'search' }]) {
+    await assert.rejects(readLibrary(input), { code: 'invalid_library_arguments' })
   }
 })
 
@@ -155,8 +185,8 @@ test('actual process adapter reads the library from a fake read-only backend wit
   const code = `import {startMcpServer} from ${JSON.stringify(serverUrl)}; import {readLibrary} from ${JSON.stringify(libraryUrl)};
 const runtime=Object.fromEntries(['bindMachineDelivery','capabilities','context','observe','submit','get','cancel','resume'].map(key=>[key,()=>{throw new Error('world forbidden')} ]));runtime.library=readLibrary;await startMcpServer({runtime}).done;`
   await withMcpClient(async client => {
-    assert.match(client.initialize.result.instructions, /self-sustaining burner loops whose fuel the system delivers/)
-    assert.match(client.initialize.result.instructions, /first finished-architecture checkpoint, not the first build/)
+    assert.match(client.initialize.result.instructions, /knowledge stage category/)
+    assert.match(client.initialize.result.instructions, /no agent fuel runs/)
     const r = await client.request('tools/call', { name: 'factorio_library', arguments: { kind: 'skill', action: 'search', query: 'electricity' } })
     assert.equal(r.result.structuredContent.results[0].id, 'steam-power-bootstrap')
     assert.equal(r.result.isError, false)

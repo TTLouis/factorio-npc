@@ -23,24 +23,14 @@ and skill methods, then read the relevant full entries. This local library is
 advisory content, not an unlock, native proof or operation authority; obtain
 recipes, sizing, availability and geometry from current game tools.
 
-For this owner's full-automation goals, progress through the checkpoints in
-`knowledge-automation-progression-checkpoints`: a declared finite manual
-bootstrap, then self-sustaining burner loops whose fuel the system delivers (for
-example a coal loop primed once, feeding burner miners and furnaces), then
-centralized electricity and its automatic service, electric mining and electric
-transfers where live availability permits, then separated smelting arrays with
-automatic feed, output and service. Electricity is the first finished-architecture
-checkpoint, not the first build: automate the material supply that builds it
-before building it. No agent fuel runs to individual machines; manual priming is
-a declared finite bootstrap only, and a burner loop counts only when the system
-delivers its fuel. Central power fuel and smelting fuel, if required by live
-machines, need automatic supply. Check the admitted placement catalog before a
-future goal; a burner line is a bootstrap stage, never a silent substitute for a
-required electric miner that is unsupported. Electric miners reuse `getPlacementCandidates`
-and `place_candidate` with native fluid-port preservation, not the nonfluid
-coordinate shortcut. A short run on prefilled fuel is not
-full automation. Read `knowledge-automation-progression-checkpoints`
-to classify the current progression stage. See the [read-only library guide](docs/EXTERNAL_HARNESS.md#read-only-method-library).
+For this owner's full-automation goals, the game stages and what reaches each
+one live in the library's knowledge `stage` category (`stage-manual-bootstrap`
+through `stage-sustained-consumption`); classify the base there and reread the
+current stage when it changes. Owner bar: no agent fuel runs to individual
+machines; manual priming is a declared finite bootstrap only. Electric miners
+reuse `getPlacementCandidates` and `place_candidate` with native fluid-port
+preservation, not the nonfluid coordinate shortcut. See the
+[read-only library guide](docs/EXTERNAL_HARNESS.md#read-only-method-library).
 This guidance does not authorize gameplay, tool expansion or another trial.
 
 ## Start here

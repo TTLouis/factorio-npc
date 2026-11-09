@@ -262,7 +262,7 @@ const ENTRIES: Entry[] = [
     summary: 'A checkpoint scale for classifying how automated a base is from observed facts and naming the next unmet checkpoint.',
     use: 'Judging how automated the current base is, choosing what to automate next, or deciding whether a short run shows sustained automation.', skip: 'The current stage and next checkpoint are already established by fresh observations of the same base.',
     checks: ['Power source, its fuel or supply route, and which machines draw electricity versus burner fuel.', 'Whether machine and fuel inventories were replenished with no agent actions over a fresh observation window.', 'Current capabilities and the admitted placement and tool support for the machines a checkpoint needs, such as electric miners.'],
-    steps: ['The checkpoints run in order from manual bootstrap through burner loops, centralized electricity, electric mining and transfers and separated smelting to sustained downstream consumption; each builds on the earlier ones.', 'Manual bootstrap: the agent hand-places and primes machines; priming is finite and declared.', 'Self-sustaining burner loops: burner mining or smelting whose fuel is delivered by the system rather than by agent fuel runs.', 'Centralized electricity: a power network whose fuel or service supply arrives automatically.', 'Electric mining and transfers: electric miners and electric transfers on that network, where live availability and tool support allow.', 'Separated smelting arrays: automatic feed, output and, if the machines need it, fuel service.', 'Sustained downstream consumption: science or labs running from the earlier checkpoints without agent intervention.', 'Place the base at the highest checkpoint whose evidence holds over a fresh window and name the first checkpoint that lacks it.', 'Contrast: a burner design is a stage on the scale, not a substitute for a checkpoint that tool support does not yet reach.'],
+    steps: ['The checkpoints run in order from manual bootstrap through burner loops, centralized electricity, electric mining and transfers and separated smelting to sustained downstream consumption; each builds on the earlier ones.', 'Each checkpoint has its own stage record in the knowledge stage category, from stage-manual-bootstrap to stage-sustained-consumption, saying what the stage is, what evidence reaches it and which methods serve it.', 'Place the base at the highest checkpoint whose evidence holds over a fresh window and name the first checkpoint that lacks it.', 'Contrast: a burner design is a stage on the scale, not a substitute for a checkpoint that tool support does not yet reach.'],
     done: 'The current stage is named with live evidence and the next unmet checkpoint is identified; unknown evidence leaves the checkpoint unmet.',
     failures: ['Prefilled stocks or a short positive run are classified as sustained.', 'Repeated individual refueling is counted as automation.', 'Unlocks or tool support are assumed from catalog presence.'],
     requires: ['Current capability evidence and admitted placement catalog for any machine type a checkpoint needs.'],
@@ -773,3 +773,55 @@ export const LEGACY_KNOWLEDGE_DEFINITIONS = LEGACY_KNOWLEDGE_ENTRIES.map(definit
 // Typed views share immutable authored records; persistence retains legacy bytes.
 export const LEVELED_SKILL_DEFINITIONS = LEVELED_LIBRARY_DEFINITIONS.filter(entry => entry.content_type === 'skill')
 export const LEVELED_KNOWLEDGE_DEFINITIONS = LEVELED_LIBRARY_DEFINITIONS.filter(entry => entry.content_type === 'knowledge')
+
+// Game-stage records: the knowledge "stage" sub-category. Each is one checkpoint
+// of knowledge-automation-progression-checkpoints, in order, saying what the stage
+// is, what evidence shows it is reached, and which library methods serve it.
+// Methods only: no counts, rates or build orders. Exported beside the entries.
+export interface ProgressionStage {
+  id: string
+  name: string
+  summary: string
+  aliases: string[]
+  reached_when: string[]
+  not_yet: string[]
+  methods: string[]
+}
+export const PROGRESSION_STAGES: ProgressionStage[] = [
+  { id: 'stage-manual-bootstrap', name: 'Stage: Manual Bootstrap',
+    summary: 'The agent hand-places the first machines and primes them. Priming is finite and declared up front; it only starts the next stage.',
+    aliases: ['bootstrap', 'start', 'first machines', 'priming', 'hand feeding'],
+    reached_when: ['The machines that will start the first self-fueling loop exist and the declared priming is done.'],
+    not_yet: ['Priming that keeps recurring is an agent fuel run, not a bootstrap.'],
+    methods: ['knowledge-acquisition-paths', 'missing-item-bootstrap', 'skill-minimum-useful-bootstrap', 'skill-reuse-before-building', 'skill-construction-kit-planning', 'direct-miner-smelting'] },
+  { id: 'stage-burner-loops', name: 'Stage: Self-Sustaining Burner Loops',
+    summary: 'Burner mining and smelting whose fuel the system delivers, for example a coal loop primed once that feeds burner miners and furnaces. It automates the material supply that later builds electricity.',
+    aliases: ['burner loop', 'coal loop', 'burner miners', 'burner smelting', 'fuel delivery', 'automated fuel'],
+    reached_when: ['Fuel reaches every burner machine in the loop by belt or inserter, with no agent action, over a fresh observation window.'],
+    not_yet: ['A loop that runs only on the priming or on repeated hand refueling.'],
+    methods: ['burner-coal-loop', 'burner-inserter-refueling', 'direct-miner-smelting', 'starter-mining-belt-output', 'skill-manual-to-automatic-transition', 'skill-place-observe-connect', 'skill-prove-sustainment'] },
+  { id: 'stage-central-electricity', name: 'Stage: Centralized Electricity',
+    summary: 'A power network whose fuel or service supply arrives automatically. It is the first finished-architecture checkpoint, not the first build: the supply that builds and fuels it comes from the earlier stages.',
+    aliases: ['electricity', 'power', 'steam power', 'centralized power', 'power network'],
+    reached_when: ['Generation runs with fuel delivered by the system and consumers are not short of power over a fresh window.'],
+    not_yet: ['Generation running on prefilled fuel or hand-delivered fuel.'],
+    methods: ['knowledge-machine-state', 'steam-power-bootstrap', 'skill-grow-generation-with-load', 'skill-protect-critical-supply', 'skill-complete-operating-cell', 'skill-prove-sustainment'] },
+  { id: 'stage-electric-mining-transfers', name: 'Stage: Electric Mining and Transfers',
+    summary: 'Electric miners and electric transfers on the power network, where live unlocks and admitted placement allow. Burner machines from earlier stages are replaced here, not kept as the finished design.',
+    aliases: ['electric mining', 'electric miners', 'electric drills', 'electric inserters', 'replace burner'],
+    reached_when: ['Mining and transfers that the goal needs run on the network with automatic output.'],
+    not_yet: ['A burner line kept in place of an electric miner the goal requires; report the capability gap instead.'],
+    methods: ['knowledge-available-capabilities', 'knowledge-connection-geometry', 'starter-mining-belt-output', 'skill-deliberate-belt-routing', 'skill-direct-transfer', 'skill-check-unlocks-before-improvising'] },
+  { id: 'stage-smelting-arrays', name: 'Stage: Separated Smelting Arrays',
+    summary: 'Smelting arrays apart from the ore patch, with automatic feed, output and, where the machines need it, fuel service, sized to the transport that serves them.',
+    aliases: ['smelting array', 'furnace column', 'smelting line', 'plate production'],
+    reached_when: ['Each array is fed and emptied automatically and its measured output matches what its transport carries.'],
+    not_yet: ['Furnaces fed or emptied by the agent.'],
+    methods: ['knowledge-owner-expandable-base', 'skill-size-array-to-transport', 'starter-smelting-row', 'scale-out-production-line', 'two-item-half-belt', 'belt-side-load-merge', 'skill-commission-before-copying'] },
+  { id: 'stage-sustained-consumption', name: 'Stage: Sustained Downstream Consumption',
+    summary: 'Science and labs, or other consumers, running from the earlier stages without agent intervention.',
+    aliases: ['science', 'research', 'labs', 'downstream', 'unattended production'],
+    reached_when: ['Consumers keep working from automatic supply over a fresh window with no agent actions.'],
+    not_yet: ['Hand-crafted or hand-delivered inputs.'],
+    methods: ['knowledge-rates-stocks-freshness', 'knowledge-owner-tech-unlock-awareness', 'skill-size-research-to-supply', 'skill-define-production-interfaces', 'skill-manage-every-output', 'skill-find-actual-bottleneck', 'skill-prove-sustainment'] },
+]

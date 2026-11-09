@@ -448,14 +448,20 @@ are the native `defines.entity_status` values.
 
 `factorio_library` exposes separate `knowledge` references and `skill` methods.
 Use `action: "search"` with a nonempty `query` and optional `limit` (1–8), then
-`action: "get"` with the exact `id` for full guidance. Search cards are bounded;
+`action: "get"` with the exact `id` for full guidance. Knowledge has a `stage`
+category: `{"kind":"knowledge","action":"search","category":"stage"}` lists the
+ordered game-stage records without a query, and a query with the category
+searches only them. A stage record's `get` returns what the stage is, what
+evidence reaches it, what does not count yet, its neighbours and the methods
+that serve it. Search cards are bounded;
 full entries are returned intact or refused above 7 KiB. A get call does not
 accept query/limit, and a search does not accept an ID. No full catalog is added
 to context automatically.
 
 ```json
 {"kind":"knowledge","action":"search","query":"individual refueling"}
-{"kind":"knowledge","action":"get","id":"knowledge-automation-progression-checkpoints"}
+{"kind":"knowledge","action":"search","category":"stage"}
+{"kind":"knowledge","action":"get","id":"stage-burner-loops"}
 {"kind":"skill","action":"search","query":"smelting"}
 ```
 
@@ -468,25 +474,16 @@ and regeneration. Source IDs are retained in each entry. Full skill
 not exposed as authority. All entries remain untrusted advisory content, not
 current availability, live facts, native mastery or permission to act.
 
-For this owner, the default full-automation progression follows
-`knowledge-automation-progression-checkpoints`: a declared finite manual
-bootstrap; self-sustaining burner loops whose fuel the system delivers; then
-centralized, automatically sustained electricity; electric mining and electric
-transfers where available; then separated smelting arrays with automatic feed,
-output and service. Electricity is the first finished-architecture checkpoint,
-not the first build: automate the material supply that builds it first. The
-agent must not fuel individual machines as the operating design. Initial manual
-priming is a declared finite bootstrap phase only. Automatically
-supply central power fuel and any smelting fuel required by live machines.
-Prefilled burner stocks or a short production demonstration do not establish
-full automation. Relevant fuel/power/mining/smelting/sustainment method views link
-to this requirement; burner methods may serve bootstrap without becoming the
-finished architecture.
+For this owner, full-automation progress is judged by the stage records. The
+owner bar stays here: the agent must not fuel individual machines as the
+operating design, and initial manual priming is a declared finite bootstrap
+phase only. Prefilled stocks or a short production demonstration do not
+establish full automation.
 
 Read current prototype/technology/recipe and tool facts first, including the
 admitted electric-miner candidate capability. Library guidance does not add
 operations or prove an unlock. Surface any missing capability before a future
-goal rather than silently substitute burner miners in the finished design. This update does not deploy
+goal rather than keep burner miners in the finished design. This update does not deploy
 or launch a model trial.
 
 ## Automatic production tools
