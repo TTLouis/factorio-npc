@@ -275,13 +275,22 @@ function preflightFailure(preflight) {
 
 // Items whose actor-inventory count an operation is expected to change. Used for
 // before/after observation only; never as attribution or goal proof.
+// The probe counts any name the operation parser accepts (factorioName: modded names with dots or capitals too);
+// the probe command escapes each with luaString.
+const probeNames = (names, max) => [...new Set(names.filter(name => {
+  try { factorioName(name); return true }
+  catch { return false }
+}))].slice(0, max)
+
 function effectItems(operation, found) {
   // pick_up_ground_items: the items its preflight found in the box.
-  if (operation.name === 'pick_up_ground_items') return [...new Set((Array.isArray(found) ? found : []).filter(name => typeof name === 'string' && /^[a-z0-9_-]{1,100}$/.test(name)))].slice(0, MAX_PICKUP_ITEMS)
+  if (operation.name === 'pick_up_ground_items') return probeNames(Array.isArray(found) ? found : [], MAX_PICKUP_ITEMS)
   const args = operation.args ?? {}
+  // supply_entity: every item it moves from the actor.
+  if (operation.name === 'supply_entity') return probeNames((Array.isArray(args.items) ? args.items : []).map(item => item?.item_name), 16)
   const name = { craft_item: args.item_name, harvest_product: args.product_name, move_items_exact: args.item_name,
     mine_resource_at: args.resource_name, place_entity: args.entity_name, place_line: args.entity_name }[operation.name]
-  return typeof name === 'string' && /^[a-z0-9_-]{1,100}$/.test(name) ? [name] : []
+  return probeNames([name], 1)
 }
 
 export function renderExternalOperation(raw) {
