@@ -13,8 +13,8 @@ else
 fi
 NODE_VERSION="v24.21.0"
 PNPM_VERSION="10.30.1"
-SGLUNA_REF="02266f3c623340cb9c8009103359adb4ad88505c"
-REVISION="2026-11-08.shared-harness-ci"
+SGLUNA_REF="7b8aa2dde541fc45b9c99a17867fb147f62ee2c0"
+REVISION="2026-11-09.external-placement-library"
 DEPLOYMENT_REVISION="sgluna-deploy-v8-npc-staging"
 WORK=""
 
