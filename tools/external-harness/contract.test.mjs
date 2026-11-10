@@ -4,7 +4,7 @@ import test from 'node:test'
 
 import { libraryMetadata } from './library.mjs'
 import { MCP_PROTOCOL_VERSION, MCP_TOOLS } from './mcp-server.mjs'
-import { capabilities, LINE_PROTOTYPES, OBSERVATION_NAMES, OPERATION_NAMES } from './native-bridge.mjs'
+import { capabilities, LINE_PLACEMENT_DOMAIN, OBSERVATION_NAMES, OPERATION_NAMES } from './native-bridge.mjs'
 
 const manifest = JSON.parse(readFileSync(new URL('../../contracts/factorio-tool-contract.json', import.meta.url), 'utf8'))
 const external = manifest.external_harness
@@ -82,8 +82,9 @@ test('external-only line placement agrees with the bridge and the native mod', (
   const catalog = capabilities()
   const line = catalog.operations.find(operation => operation.name === 'place_line')
   assert.deepEqual(line.args, external.external_only_operations.place_line.args)
-  assert.deepEqual(external.line_placement_prototypes, [...LINE_PROTOTYPES])
-  assert.deepEqual(catalog.limits.line_prototypes, [...LINE_PROTOTYPES])
+  assert.equal(external.line_placement_domain, LINE_PLACEMENT_DOMAIN)
+  assert.equal(catalog.limits.line_domain, LINE_PLACEMENT_DOMAIN)
+  assert.equal(external.line_placement_prototypes, undefined)
   assert.equal(catalog.limits.line_count, external.limits.line_count)
   assert.equal(catalog.limits.line_spacing, external.limits.line_spacing)
   const mod = readFileSync(new URL('../../packages/autorio/src/line_placement.ts', import.meta.url), 'utf8')
@@ -94,7 +95,9 @@ test('external-only line placement agrees with the bridge and the native mod', (
   const lineHistory = Number(mod.match(/LINE_PLACEMENT_LIMITS = \{[^}]*history: (\d+)/)?.[1])
   const admissionHistory = Number(admission.match(/ADMISSION_LIMITS = \{[^}]*history: (\d+)/)?.[1])
   assert.ok(Number.isSafeInteger(admissionHistory) && lineHistory >= admissionHistory, `line history ${lineHistory} >= admission history ${admissionHistory}`)
-  assert.ok(mod.includes(`LINE_PLACEMENT_PROTOTYPES = [${LINE_PROTOTYPES.map(name => `'${name}'`).join(', ')}]`))
+  // No prototype list on either side: the game decides what is placeable; the mod refuses overlapping tiles.
+  assert.doesNotMatch(mod, /LINE_PLACEMENT_PROTOTYPES/)
+  assert.ok(mod.includes("code: 'line_tiles_overlap'"))
   const bridge = readFileSync(new URL('../../deploy/pterodactyl/runtime-v8/operator-native-bridge.mjs', import.meta.url), 'utf8')
   assert.ok(bridge.includes(`limit=${external.limits.footprint_scan}}); if #found>=${external.limits.footprint_scan} then`))
   assert.ok(bridge.includes(`#blockers<${external.limits.footprint_blockers} and blocks(e) then`))

@@ -5,7 +5,7 @@ import type { TaskBatchIdentity, TaskBatchReceipt } from './task_manager'
 import { reservation_intersection } from './area_reservations'
 import { resolve_recorded_entity } from './entity_reference'
 import { find_world_entities } from './npc_vision'
-import { collision_layers } from './placement_obstructions'
+import { collision_layers, terrain_collisions } from './placement_obstructions'
 import { protected_read } from './electric_facts'
 import { placement_item_preflight, planned_placement_footprint } from './placement_preflight'
 
@@ -21,7 +21,16 @@ import { placement_item_preflight, planned_placement_footprint } from './placeme
 //              (terminal_line_placement_settlement): the tiles placed, the tiles not placed and the first refusal.
 // Only the external bridge calls this; the internal planner catalog does not expose it.
 
-export const LINE_PLACEMENT_PROTOTYPES = ['transport-belt', 'small-electric-pole']
+// No prototype list: any prototype with a proven nonfluid footprint may be lined, one per tile, provided consecutive
+// footprints do not overlap (line_tiles_overlap). The bridge checks entity_name is a name; the game decides the rest.
+const NAME_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789_-'
+function prototype_name(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 100) return false
+  for (let i = 0; i < value.length; i++) {
+    if (!NAME_CHARS.includes(value.charAt(i))) return false
+  }
+  return true
+}
 // history must be at least ADMISSION_LIMITS.history: a line's record is its completion evidence, so it may not be evicted
 // while its admission is still retained (Sol review: the 33rd line made the first one's receipt uncertain and fenced
 // submissions). Not imported, to avoid a module cycle; the external contract test pins the relation.
@@ -96,7 +105,7 @@ export function line_tile(args: { x: number, y: number, line_direction: number, 
 // The arguments the bridge renders, checked again here; undefined when valid.
 export function invalid_line_args(args: Partial<LineArgs> | undefined) {
   if (!args || typeof args !== 'object') return 'args'
-  if (typeof args.entity_name !== 'string' || !LINE_PLACEMENT_PROTOTYPES.includes(args.entity_name)) return 'entity_name'
+  if (!prototype_name(args.entity_name)) return 'entity_name'
   if (!coordinate(args.x)) return 'x'
   if (!coordinate(args.y)) return 'y'
   if (!DIRECTIONS.includes(args.direction as number)) return 'direction'
@@ -141,10 +150,25 @@ export function external_footprint(surface: LuaSurface, box: BoundingBox, placed
   return blockers.length > 0 ? { code: 'placement_footprint_occupied', blockers } : { code: undefined, blockers }
 }
 
+function boxes_overlap(a: BoundingBox, b: BoundingBox) {
+  return a.left_top.x < b.right_bottom.x && b.left_top.x < a.right_bottom.x && a.left_top.y < b.right_bottom.y && b.left_top.y < a.right_bottom.y
+}
+
+// Diagnostic for a can_place_entity refusal: entities on overlapping collision layers (the external footprint rule),
+// otherwise up to four colliding terrain tiles. Empty when neither explains it.
+function not_clear_blockers(actor: ControlledActor, entity_name: string, footprint: any): LineBlocker[] {
+  const entities = external_footprint(actor.surface, footprint.world_box, entity_name, actor.character)
+  if (entities.blockers.length > 0) return entities.blockers
+  const layers = protected_read(() => collision_layers(prototypes.entity[entity_name]))
+  if (!layers) return []
+  return terrain_collisions(actor, layers, footprint, 4).tiles
+    .map(tile => ({ name: tile.name as string, type: 'tile', position: tile.position as { x: number, y: number } }))
+}
+
 /**
  * The strict read-only preflight: every tile of the line must be placeable now, and the actor must hold every item the
  * line consumes. Per tile: the native footprint centre is the requested one (exact grid), no NPC reservation, the manual
- * can_place_entity check, and the external footprint rule. The first failing tile is named; nothing is changed.
+ * can_place_entity check (naming what collides when it refuses), no overlap with the previous tile, and the external footprint rule. The first failing tile is named; nothing is changed.
  */
 export function line_placement_preflight(actor: ControlledActor | undefined, args: Partial<LineArgs> | undefined) {
   const field = invalid_line_args(args)
@@ -174,8 +198,10 @@ export function line_placement_preflight(actor: ControlledActor | undefined, arg
     if (reservation_intersection(surface, footprint.world_box) !== undefined) return { ok: false, code: 'npc_area_reserved', tile_index: index, planned_footprint }
     if (!surface.can_place_entity({ name: line.entity_name, position: footprint.position, direction: line.direction,
       force: actor!.force, build_check_type: defines.build_check_type.manual })) {
-      return { ok: false, code: 'placement_not_clear', tile_index: index, planned_footprint }
+      return { ok: false, code: 'placement_not_clear', tile_index: index, blockers: not_clear_blockers(actor!, line.entity_name, footprint), planned_footprint }
     }
+    const previous = tiles[tiles.length - 1]
+    if (previous && boxes_overlap(previous.world_box, footprint.world_box)) return { ok: false, code: 'line_tiles_overlap', tile_index: index, planned_footprint }
     const checked = external_footprint(surface, footprint.world_box, line.entity_name, actor!.character)
     if (checked.code !== undefined) return { ok: false, code: checked.code, tile_index: index, blockers: checked.blockers, planned_footprint }
     tiles.push({ index, position: footprint.position, world_box: footprint.world_box })

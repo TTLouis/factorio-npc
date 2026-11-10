@@ -164,7 +164,7 @@ case "$LANE" in
     ;;
   line-placement)
     # External-harness place_line through the shipped NativeBridge: belt run, pole line, mid-line partial and refusals.
-    printf '[npc-test][line-placement] Running belt, pole, partial, shortfall and blocked-tile gates...\n'
+    printf '[npc-test][line-placement] Running belt, pole, partial, shortfall, blocked, stump, wide, water and receipt gates...\n'
     run_node line_placement_factorio.mjs
     ;;
   external-ground-pickup)

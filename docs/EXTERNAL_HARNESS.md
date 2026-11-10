@@ -77,21 +77,26 @@ admission and protected geometry, and refuses clearance. Missing guard capabilit
 unknown geometry, extra joins, changed targets or lost claim history fail closed.
 An unused frozen claim remains durable; deleting claims or the ledger is unsafe.
 
-`place_line` places a straight run of `transport-belt` or a line of
-`small-electric-pole` in one admitted operation:
+`place_line` places a straight line of one prototype in one admitted operation:
 `{entity_name, x, y, direction?, line_direction, count, spacing?}`. Tile `i` is
 `(x, y)` plus `i * spacing` steps along `line_direction` (0 north, 4 east, 8 south,
 12 west); `direction` is each entity's own facing (default 0), `count` is 1–32
 (`capabilities.limits.line_count`) and `spacing` 1–8 (default 1). It is
 external-only: not part of the shared ordinary-agent or runtime-v8 catalog, and
-it needs the mod capability `external_line_placement_supported`.
+it needs the mod capability `external_line_placement_supported`. It names no
+prototype: any entity with a native zero-fluidbox witness may be lined (fluid-port
+prototypes refuse with `nonfluid_footprint_unproven`), and a tile whose footprint
+overlaps the previous tile's refuses with `line_tiles_overlap` (increase `spacing`).
 Preflight is strict and read-only: the actor must hold all `count` items, and every
 tile must pass the same exact-grid, NPC-reservation, native collision and external
 footprint checks as `place_entity`, within 128 tiles of the actor (rechecked at
 admission). Items on the ground and any other character block a tile. The actor's own
 character does not: execution steps out of each tile before placing it, so a line may
 start where the previous one ended. Any failing tile refuses the whole line before it is sent (`not_happened`), with
-`tile_index` and up to 8 blockers. A refusal at admission (the world changed after
+`tile_index` and up to 8 blockers. When the native collision check itself refuses
+(`placement_not_clear`, here and for `place_entity`), `blockers` names the colliding
+entities or, when none collide, up to 4 colliding terrain tiles (`type: "tile"`); an
+empty list means the cause was not found. A refusal at admission (the world changed after
 preflight) is a terminal `native_refused_before_admission` receipt whose
 `evidence.refusal` names the guard code and, when the atomic preflight re-run refused,
 its `native_code`, `tile_index` and blockers. Execution queues `count` native placements in one
@@ -430,6 +435,12 @@ observation of the actor, not attribution. Other activity in the same ticks can
 contribute, and `available: false` means the actor could not be re-read. It is
 absent when the actor could not be read before submission.
 
+A completed `place_entity`, `place_candidate` or single-placement receipt may include
+`placed_entity` (`unit_number`, `entity_name`, `entity_type`, `position`,
+`direction`) from the native placement result whose batch identity is exactly this
+admission's. A later operation overwrites that result, so it may be absent; then read
+the position with `getNearbyEntities`.
+
 A running receipt carries the same observation as `observed_progress`, read
 once per reply and never stored; a waiting `factorio_get` reads it once, at the
 end of its wait. With reason `exact_admission_in_flight` it also carries
@@ -488,11 +499,12 @@ operating design, and initial manual priming is a declared finite bootstrap
 phase only. Prefilled stocks or a short production demonstration do not
 establish full automation.
 
-Read current prototype/technology/recipe and tool facts first, including the
-admitted electric-miner candidate capability. Library guidance does not add
-operations or prove an unlock. Surface any missing capability before a future
-goal rather than keep burner miners in the finished design. This update does not deploy
-or launch a model trial.
+Read current prototype/technology/recipe and tool facts first, including which
+placement path a prototype needs: `place_entity` for nonfluid prototypes,
+`getPlacementCandidates` and `place_candidate` for prototypes with fluid ports.
+Prompts name no prototype; capabilities and refusals carry these facts, so a
+mod that renames or replaces entities needs no prompt change. Library guidance
+does not add operations or prove an unlock.
 
 ## Automatic production tools
 

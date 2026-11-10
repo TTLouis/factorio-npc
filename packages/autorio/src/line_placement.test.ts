@@ -19,10 +19,13 @@ vi.mock('./placement_preflight', () => ({
     if (held.count < 1) return { ok: false, code: 'placement_item_missing', placement_item }
     return { ok: true, placement_item, preservation_nonfluid_output: { version: 1, entity_name, fluid_port_count: 0 } }
   },
-  planned_placement_footprint: (_name: string, x: number, y: number) => ({
-    position: { x: Math.floor(x) + 0.5, y: Math.floor(y) + 0.5 },
-    world_box: { left_top: { x: Math.floor(x), y: Math.floor(y) }, right_bottom: { x: Math.floor(x) + 1, y: Math.floor(y) + 1 } },
-  }),
+  planned_placement_footprint: (name: string, x: number, y: number) => {
+    const size = name === 'wide-machine' ? 2 : 1
+    return {
+      position: { x: Math.floor(x) + 0.5, y: Math.floor(y) + 0.5 },
+      world_box: { left_top: { x: Math.floor(x), y: Math.floor(y) }, right_bottom: { x: Math.floor(x) + size, y: Math.floor(y) + size } },
+    }
+  },
 }))
 vi.mock('./npc_vision', () => ({ find_world_entities: (surface: any, filters: any) => surface.find_entities_filtered(filters) }))
 vi.mock('./area_reservations', () => ({ reservation_intersection: () => undefined }))
@@ -31,10 +34,12 @@ vi.mock('./entity_reference', () => ({ resolve_recorded_entity: (unit_number: nu
 const standing = new Set<number>()
 let ground: { x: number, y: number }[] = []
 let solid: { x: number, y: number }[] = []
+let water: { x: number, y: number }[] = []
 const at = (list: { x: number, y: number }[], box: any) => list.filter(p => p.x > box.left_top.x && p.x < box.right_bottom.x && p.y > box.left_top.y && p.y < box.right_bottom.y)
 const surface = {
   index: 1,
   can_place_entity: ({ position }: any) => !solid.some(p => p.x === position.x && p.y === position.y),
+  get_tile: (x: number, y: number) => ({ name: water.some(p => p.x === x && p.y === y) ? 'water' : 'grass-1', collides_with: (layer: string) => layer === 'water_tile' && water.some(p => p.x === x && p.y === y) }),
   find_entities_filtered: ({ area }: any) => at(ground, area).map(p => ({ valid: true, type: 'item-entity', name: 'item-on-ground', position: p, stack: { valid_for_read: true, name: 'iron-plate' } })),
 }
 const actor: any = { is_valid: true, surface, force: { index: 1 }, status_snapshot: () => ({ actor_id: 9 }) }
@@ -51,13 +56,15 @@ function deps(batch = { batch_id: 5, batch_generation: 2, batch_ref: 'batch-g2-5
 }
 
 beforeEach(() => {
-  ;(globalThis as any).math = { floor: Math.floor, abs: Math.abs, huge: Infinity }
+  ;(globalThis as any).math = { floor: Math.floor, ceil: Math.ceil, abs: Math.abs, huge: Infinity }
   ;(globalThis as any).defines = { build_check_type: { manual: 1 } }
   ;(globalThis as any).storage = {}
   ;(globalThis as any).game.tick = 100
   held.count = 10
   ground = []
   solid = []
+  water = []
+  ;(globalThis as any).prototypes = { entity: { 'transport-belt': { collision_mask: { layers: { object: true, water_tile: true } } } } }
   standing.clear()
 })
 
@@ -73,9 +80,21 @@ describe('external line placement', () => {
     expect(line_placement_preflight(actor, args)).toMatchObject({ ok: false, code: 'placement_footprint_occupied', tile_index: 1, blockers: [{ type: 'item-entity', item: 'iron-plate' }] })
     ground = []
     solid = [{ x: 6.5, y: -3.5 }]
-    expect(line_placement_preflight(actor, args)).toMatchObject({ ok: false, code: 'placement_not_clear', tile_index: 2 })
+    expect(line_placement_preflight(actor, args)).toMatchObject({ ok: false, code: 'placement_not_clear', tile_index: 2, blockers: [] })
+    // A refusal names what collides: the colliding terrain tile when no entity does (trial 6 had only the bare code).
+    water = [{ x: 6, y: -4 }]
+    expect(line_placement_preflight(actor, args)).toMatchObject({ ok: false, code: 'placement_not_clear', tile_index: 2, blockers: [{ type: 'tile', name: 'water', position: { x: 6, y: -4 } }] })
+    ground = [{ x: 6.5, y: -3.5 }]
+    expect(line_placement_preflight(actor, args).blockers).toMatchObject([{ type: 'item-entity', item: 'iron-plate' }])
+    ground = []
+    water = []
+    solid = []
+    // No prototype list: a wider prototype lines when spacing clears its footprint, and refuses before anything when not.
+    expect(line_placement_preflight(actor, { ...args, entity_name: 'wide-machine' })).toMatchObject({ ok: true })
+    expect(line_placement_preflight(actor, { ...args, entity_name: 'wide-machine', spacing: 1 })).toMatchObject({ ok: false, code: 'line_tiles_overlap', tile_index: 1 })
+    solid = [{ x: 6.5, y: -3.5 }]
     expect(line_placement_preflight(actor, { ...args, x: 2.25 })).toMatchObject({ ok: false, code: 'exact_grid_required', tile_index: 0 })
-    for (const bad of [{ count: 33 }, { count: 0 }, { spacing: 9 }, { entity_name: 'stone-furnace' }, { line_direction: 2 }, { direction: 6 }]) {
+    for (const bad of [{ count: 33 }, { count: 0 }, { spacing: 9 }, { entity_name: 'Not A Name' }, { entity_name: '' }, { line_direction: 2 }, { direction: 6 }]) {
       expect(line_placement_preflight(actor, { ...args, ...bad })).toMatchObject({ ok: false, code: 'invalid_line_args' })
     }
   })

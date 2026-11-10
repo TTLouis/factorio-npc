@@ -186,6 +186,29 @@ test('exact admission completion is execution evidence, never goal success', asy
   assert.equal(result.evidence.basic_operation, undefined)
 })
 
+// Trial 6: receipts never carried the placed unit number because the bridge read a field the status snapshot does not have.
+test('a receipt names the entity its own placement created, and only its own', async () => {
+  const f = fixture(); const prepared = await f.bridge.prepare(operation, 'run/op_1')
+  f.state.status.admission_journal = [row(prepared.pending, 'completed')]
+  f.state.status.receipt_journal = [{ batch_id: 1, batch_generation: 2, batch_ref: 'batch-g2-1', state: 'completed', task_count: 1, task_types: ['placing'], tick: 180 }]
+  f.state.journal.high_water = 5
+  const placedResult = { accepted: true, completed: true, code: 'completed', entity_name: 'stone-furnace', placed_unit_number: 412, placed_entity_type: 'furnace',
+    placed_position: { x: 3, y: -2 }, placed_direction: 0, placed_batch_id: 1, placed_batch_generation: 2, placed_batch_ref: 'batch-g2-1' }
+  f.state.status.basic_operation = { last_result: placedResult, next_operation_id: 9 }
+  const result = await f.bridge.receipt(prepared.pending)
+  assert.deepEqual(result.placed_entity, { unit_number: 412, entity_name: 'stone-furnace', entity_type: 'furnace', position: { x: 3, y: -2 }, direction: 0, source: 'native_placement_result' })
+  assert.equal(result.evidence.basic_operation.placed_unit_number, 412)
+  assert.equal(result.goal_verified, false)
+  // Another batch's result (same ref text, other generation), or one overwritten by a later operation, is not this receipt's.
+  for (const other of [{ ...placedResult, placed_batch_generation: 3 }, { ...placedResult, placed_batch_ref: 'batch-g2-2' }, { accepted: true, completed: true, code: 'completed' }]) {
+    f.state.status.basic_operation = { last_result: other, next_operation_id: 10 }
+    const unrelated = await f.bridge.receipt(prepared.pending)
+    assert.equal(unrelated.placed_entity, undefined)
+    assert.equal(unrelated.evidence.basic_operation, undefined)
+    assert.equal(unrelated.state, 'completed')
+  }
+})
+
 test('same key with wrong signature is uncertain, unrelated receipts do not count', async () => {
   const f = fixture(); const prepared = await f.bridge.prepare(operation, 'run/op_1')
   const admission = row(prepared.pending, 'completed'); admission.signature = 'b'.repeat(64)
@@ -570,6 +593,7 @@ test('placement candidates are annotated with the same footprint rule external p
   assert.ok(rule(annotation).includes('if on and mask[k] then return true end'))
   assert.ok(annotation.includes(`external_footprint(surface,box,nil,'transport-belt')`), 'the annotation checks against the candidate prototype')
   assert.ok(f.calls.find(text => text.includes('exact_grid_required')).includes(`external_footprint(surface,f.world_box,nil,'transport-belt')`), 'place_entity checks against its own prototype')
+  assert.ok(f.calls.find(text => text.includes('exact_grid_required')).includes(`code="placement_not_clear",blockers=not_clear_blockers(surface,f.world_box,'transport-belt'),planned_footprint=f`), 'a can_place refusal names what collides')
 })
 
 test('candidate annotation fails visibly, never by dropping or inventing eligibility', async () => {
@@ -874,12 +898,13 @@ test('place_line parses exact bounded arguments, fills defaults and renders one 
     { entity_name: 'small-electric-pole', x: 0.5, y: 0.5, direction: 0, line_direction: 8, count: 4, spacing: 5 })
   assert.equal(renderExternalOperation(line), `remote.call("autorio_operations","place_line",'transport-belt',2.5,-3.5,4,4,3,1)`)
   for (const args of [
-    { ...line.args, entity_name: 'stone-furnace' }, { ...line.args, count: 0 }, { ...line.args, count: 33 }, { ...line.args, spacing: 9 },
+    { ...line.args, entity_name: '' }, { ...line.args, entity_name: 7 }, { ...line.args, count: 0 }, { ...line.args, count: 33 }, { ...line.args, spacing: 9 },
     { ...line.args, line_direction: 2 }, { ...line.args, direction: 6 }, { ...line.args, x: Number.NaN }, { ...line.args, refuse_clearance: false },
     { ...line.args, lua: 'game.print(1)' }, { ...line.args, count: 2.5 },
   ]) assert.throws(() => parseExternalOperation({ name: 'place_line', args }), JSON.stringify(args))
   const catalog = capabilities()
-  assert.deepEqual(catalog.limits.line_prototypes, ['transport-belt', 'small-electric-pole'])
+  assert.equal(catalog.limits.line_domain, 'native-nonfluid-non-overlapping')
+  assert.equal(parseExternalOperation({ name: 'place_line', args: { ...line.args, entity_name: 'stone-furnace', spacing: 2 } }).args.entity_name, 'stone-furnace')
   assert.equal(catalog.limits.line_count, 32)
   assert.equal(catalog.limits.line_spacing, 8)
   assert.ok(catalog.operations.find(item => item.name === 'place_line').external_only)

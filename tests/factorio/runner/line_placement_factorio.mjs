@@ -12,6 +12,11 @@
 //   BLOCKED    a ground item already on tile 2 refuses the whole line before it is sent, naming the tile and the item
 //   STUMP      a tree stump (a corpse whose collision layers miss the belt's) on tile 1 does not block: native placement allows the
 //              tile and the whole line completes (trial 5: stumps were refused as footprint blockers)
+//   WIDE       no prototype list: a 2x2 stone-furnace line at spacing 2 completes; at spacing 1 it refuses before sending with
+//              line_tiles_overlap at tile 1 (trial 6: place_line accepted only belts and poles)
+//   WATER      a water tile under tile 1 refuses the line (native placement_not_clear) and names the tile as the blocker;
+//              place_entity on the same tile names it too (trial 6: placement_not_clear carried no cause)
+//   RECEIPT    a completed place_entity receipt names the engine entity it created (trial 6: the unit number was never read)
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -230,6 +235,58 @@ async function stump() {
   console.log('PASS: STUMP - a stump whose collision layers miss the belt layers did not block; native placement allowed the tile and the line completed')
 }
 
+async function wide() {
+  await toStart()
+  await setHeld('stone-furnace', 3)
+  const operation = { name: 'place_line', args: { entity_name: 'stone-furnace', x: origin.x - 15.5, y: origin.y - 10.5, line_direction: 4, count: 3, spacing: 2 } }
+  const tiles = tilesOf(operation.args)
+  const overlap = await refusal({ name: 'place_line', args: { ...operation.args, spacing: 1 } }, 'line-wide-overlap')
+  assert.equal(overlap.details.native_code, 'line_tiles_overlap', JSON.stringify(overlap.details))
+  assert.equal(overlap.details.tile_index, 1, JSON.stringify(overlap.details))
+  assert.equal(await held('stone-furnace'), 3)
+  const { receipt } = await run(operation, 'line-wide')
+  assert.equal(receipt.state, 'completed', JSON.stringify(receipt).slice(0, 1500))
+  assert.equal(receipt.line_placement.placed_count, 3)
+  assertPlaced(receipt.line_placement, await entitiesAt(tiles), tiles, 'stone-furnace', 0)
+  assert.equal(await held('stone-furnace'), 0)
+  evidence.wide = { overlap: overlap.details, line: receipt.line_placement }
+  console.log('PASS: WIDE - a 2x2 furnace line at spacing 2 completed; spacing 1 refused before sending with line_tiles_overlap at tile 1')
+}
+
+async function water() {
+  await toStart()
+  await setHeld('transport-belt', 10)
+  const operation = { name: 'place_line', args: { entity_name: 'transport-belt', x: origin.x + 3, y: origin.y + 17, direction: 4, line_direction: 4, count: 3 } }
+  const tiles = tilesOf(operation.args)
+  const wet = { x: Math.floor(tiles[1].x), y: Math.floor(tiles[1].y) }
+  await lua(`s.set_tiles({{name="water",position={${wet.x},${wet.y}}}}); rcon.print(helpers.table_to_json({tile=s.get_tile(${wet.x},${wet.y}).name}))`)
+  const error = await refusal(operation, 'line-water')
+  assert.equal(error.details.native_code, 'placement_not_clear', JSON.stringify(error.details))
+  assert.equal(error.details.tile_index, 1, JSON.stringify(error.details))
+  assert.ok(list(error.details.blockers).some(blocker => blocker.type === 'tile' && blocker.name === 'water'), JSON.stringify(error.details))
+  const single = await refusal({ name: 'place_entity', args: { entity_name: 'transport-belt', x: tiles[1].x, y: tiles[1].y, direction: 4 } }, 'entity-water')
+  assert.equal(single.details.native_code, 'placement_not_clear', JSON.stringify(single.details))
+  assert.ok(list(single.details.blockers).some(blocker => blocker.type === 'tile' && blocker.name === 'water'), JSON.stringify(single.details))
+  assert.match(single.message, /water \[tile\]/)
+  assert.equal(await held('transport-belt'), 10)
+  evidence.water = { line: error.details, place_entity: single.details }
+  console.log('PASS: WATER - a water tile refused the line and place_entity with placement_not_clear, naming the tile')
+}
+
+async function placedReceipt() {
+  await toStart()
+  const at = { x: origin.x + 8, y: origin.y - 8 }
+  const { receipt } = await run({ name: 'place_entity', args: { entity_name: 'transport-belt', x: at.x, y: at.y, direction: 4 } }, 'entity-receipt')
+  assert.equal(receipt.state, 'completed', JSON.stringify(receipt).slice(0, 1500))
+  const [row] = await entitiesAt([at])
+  const engine = row.filter(entity => entity.name === 'transport-belt')
+  assert.equal(engine.length, 1, JSON.stringify(row))
+  assert.deepEqual(receipt.placed_entity, { unit_number: engine[0].unit_number, entity_name: 'transport-belt', entity_type: 'transport-belt',
+    position: { x: at.x, y: at.y }, direction: 4, source: 'native_placement_result' }, JSON.stringify(receipt).slice(0, 1500))
+  evidence.receipt = receipt.placed_entity
+  console.log(`PASS: RECEIPT - the place_entity receipt names unit ${engine[0].unit_number}, the belt the engine holds there`)
+}
+
 try {
   await fs.mkdir(results, { recursive: true })
   connection = new Rcon(Number(arg('port')), arg('password'), 15000, { host: arg('host') })
@@ -253,6 +310,9 @@ try {
   await shortfall()
   await blocked()
   await stump()
+  await wide()
+  await water()
+  await placedReceipt()
   assert.equal(forbiddenFetchCalls, 0)
   evidence.status = 'pass'
 }

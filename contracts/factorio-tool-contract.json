@@ -78,7 +78,7 @@
       "rechecked_at_execution": true,
       "model_selectable": false
     },
-    "line_placement_prototypes": ["transport-belt", "small-electric-pole"],
+    "line_placement_domain": "native-nonfluid-non-overlapping",
     "line_placement_native_safety": { "required_capability": "external_line_placement_supported", "version": 1, "execution_flag": "refuse_clearance", "preflight": "strict-every-tile-and-total-items", "admission": "single-slot-pure-submit", "journal_slots": 1, "partial": "sealed-native-line-record-placed-prefix-and-first-refusal", "restart": "uncertain", "actor_tile": "own-character-exempt-in-preflight-step-aside-in-execution" },
     "ground_pickup_native_safety": { "required_capability": "external_ground_pickup_supported", "version": 1, "targets": "item-entity-only", "execution": "native-character-mining", "preflight": "ground-stacks-present-bounded-and-fit-inventory", "admission": "single-slot-pure-submit", "journal_slots": 1, "stop": "inventory-full-or-pickup-limit-cancels" },
     "external_only_operations": { "place_line": { "args": ["entity_name", "x", "y", "direction", "line_direction", "count", "spacing"], "defaults": { "direction": 0, "spacing": 1 }, "remote": ["autorio_operations", "place_line"], "receipt_remote": ["autorio_operations", "line_placement_status"], "adapter": "deploy/pterodactyl/runtime-v8/operator-native-bridge.mjs" }, "pick_up_ground_items": { "args": ["x", "y", "radius"], "defaults": { "radius": 0 }, "remote": ["autorio_operations", "pick_up_ground_items"], "preflight_remote": ["autorio_preflight", "operation"], "adapter": "deploy/pterodactyl/runtime-v8/operator-native-bridge.mjs" } },
