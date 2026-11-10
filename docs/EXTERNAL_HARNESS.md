@@ -448,12 +448,14 @@ are the native `defines.entity_status` values.
 
 `factorio_library` exposes separate `knowledge` references and `skill` methods.
 Use `action: "search"` with a nonempty `query` and optional `limit` (1–8), then
-`action: "get"` with the exact `id` for full guidance. Knowledge has a `stage`
-category: `{"kind":"knowledge","action":"search","category":"stage"}` lists the
-ordered game-stage records without a query, and a query with the category
-searches only them. A stage record's `get` returns what the stage is, what
-evidence reaches it, what does not count yet, its neighbours and the methods
-that serve it. Search cards are bounded;
+`action: "get"` with the exact `id` for full guidance. A library may declare
+knowledge categories; `factorio_capabilities` lists them under
+`library.knowledge_categories` with their name, summary, record count and
+whether they are ordered. A search with `kind: "knowledge"` and a `category`
+lists that category's records without a query, or searches only them with one.
+A record's `get` returns its authored fields, the methods it names and, for an
+ordered category, its position and neighbours. An unknown category is refused
+with `library_category_not_found`. Search cards are bounded;
 full entries are returned intact or refused above 7 KiB. A get call does not
 accept query/limit, and a search does not accept an ID. No full catalog is added
 to context automatically.
@@ -465,8 +467,12 @@ to context automatically.
 {"kind":"skill","action":"search","query":"smelting"}
 ```
 
-The library is the leveled method library, the single knowledge source on every
-branch. `factorio_library` reads its exported fixture
+The loader knows no category, entry or count by name: it validates the pack's
+structure (schema, unique ids, method and related ids that resolve, bounded
+size) and reports what the pack contains, so a different library loads through
+the same code (`openLibrary({ file, source })`). The shipped library is the
+leveled method library, the single knowledge source on every branch; its
+`stage` category holds ordered game stages. `factorio_library` reads its exported fixture
 `packages/autorio/src/fixtures/leveled-library-v1.json`; see
 [the local library](../tools/external-harness/library/README.md) for the source
 and regeneration. Source IDs are retained in each entry. Full skill
@@ -474,8 +480,10 @@ and regeneration. Source IDs are retained in each entry. Full skill
 not exposed as authority. All entries remain untrusted advisory content, not
 current availability, live facts, native mastery or permission to act.
 
-For this owner, full-automation progress is judged by the stage records. The
-owner bar stays here: the agent must not fuel individual machines as the
+The MCP instructions point the operator to the library before each new part
+of a goal and name no category or entry. Goal acceptance is not a harness
+prompt: state it in the goal text. For this owner's full-automation goals that
+text carries the owner bar: the agent must not fuel individual machines as the
 operating design, and initial manual priming is a declared finite bootstrap
 phase only. Prefilled stocks or a short production demonstration do not
 establish full automation.

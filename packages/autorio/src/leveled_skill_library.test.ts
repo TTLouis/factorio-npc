@@ -150,7 +150,7 @@ describe('leveled knowledge and skills as a selectable, honest method library', 
   it('contains methods and live checks, never a stored bill, numerical game mechanic, recipe topology or native-mastery claim', () => {
     const pack = JSON.parse(readFileSync(new URL('./fixtures/leveled-library-v1.json', import.meta.url), 'utf8'))
     expect(pack.skills).toEqual(LEVELED_SKILL_DEFINITIONS)
-    expect(pack.schema).toBe(2)
+    expect(pack.schema).toBe(3)
     expect(pack.knowledge).toEqual(LEVELED_KNOWLEDGE_DEFINITIONS.map(raw => knowledge_reference(canonicalize_skill_definition(raw))))
     for (const reference of pack.knowledge) {
       const imported = canonicalize_skill_definition(reference)

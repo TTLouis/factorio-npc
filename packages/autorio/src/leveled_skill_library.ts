@@ -787,6 +787,11 @@ export interface ProgressionStage {
   not_yet: string[]
   methods: string[]
 }
+// The pack declares this as a knowledge category; the harness loader knows no category by name.
+export const PROGRESSION_CATEGORY = { id: 'stage', name: 'Game stages',
+  summary: 'Ordered stages of an automation goal: what reaches each stage, what does not count yet, and the methods that serve it.',
+  ordered: true }
+
 export const PROGRESSION_STAGES: ProgressionStage[] = [
   { id: 'stage-manual-bootstrap', name: 'Stage: Manual Bootstrap',
     summary: 'The agent hand-places the first machines and primes them. Priming is finite and declared up front; it only starts the next stage.',

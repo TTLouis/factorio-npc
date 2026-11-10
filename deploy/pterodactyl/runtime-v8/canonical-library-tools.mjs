@@ -1,4 +1,4 @@
-import { readLibrary } from './method-library.mjs'
+import { libraryMetadata, readLibrary } from './method-library.mjs'
 
 export const isCanonicalLibraryTool = name => ['findKnowledge', 'getKnowledgeDetails', 'findSkills', 'getSkillDetails'].includes(name)
 
@@ -24,5 +24,5 @@ export function canonicalLibraryResult(raw) {
   let value
   try { value = typeof raw === 'string' ? JSON.parse(raw) : raw } catch { return undefined }
   return value?.authority?.content === 'untrusted_advisory' && value.authority.operation_authority === false
-    && value.provenance?.source === 'packages/autorio/src/fixtures/leveled-library-v1.json' ? value : undefined
+    && value.provenance?.source === libraryMetadata().source ? value : undefined
 }

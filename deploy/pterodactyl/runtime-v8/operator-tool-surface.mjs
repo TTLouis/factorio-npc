@@ -31,11 +31,11 @@ export const OPERATOR_TOOLS = Object.freeze([
   },
   {
     name: 'factorio_library',
-    description: 'Search or read one authored knowledge reference or gameplay skill. Local read-only advisory content; no RCON, live availability, native proof or execution authority. Search methods on demand, then obtain current game facts with observations. Knowledge has a stage category (search kind=knowledge, category=stage): ordered game-stage records, each with what reaches it and the methods that serve it.',
+    description: 'Search or read one authored knowledge reference or gameplay skill. Local read-only advisory content; no RCON, live availability, native proof or execution authority. Search methods on demand, then obtain current game facts with observations. The loaded library may declare knowledge categories (factorio_capabilities library.knowledge_categories); search kind=knowledge with a category to list or search only its records, in authored order when the category is ordered.',
     inputSchema: object({ kind: { type: 'string', enum: ['knowledge', 'skill'], minLength: 1, maxLength: 9 },
       action: { type: 'string', enum: ['search', 'get'], minLength: 1, maxLength: 6 },
       query: { type: 'string', minLength: 1, maxLength: 160 }, id: { type: 'string', minLength: 1, maxLength: 100 },
-      limit: { type: 'integer', minimum: 1, maximum: 8 }, category: { type: 'string', enum: ['stage'], minLength: 1, maxLength: 5 } }, ['kind', 'action']), annotations: readOnly,
+      limit: { type: 'integer', minimum: 1, maximum: 8 }, category: { type: 'string', minLength: 1, maxLength: 40, description: 'A knowledge category id from factorio_capabilities library.knowledge_categories.' } }, ['kind', 'action']), annotations: readOnly,
   },
   {
     name: 'factorio_context',

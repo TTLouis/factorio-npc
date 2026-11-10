@@ -23,11 +23,12 @@ and skill methods, then read the relevant full entries. This local library is
 advisory content, not an unlock, native proof or operation authority; obtain
 recipes, sizing, availability and geometry from current game tools.
 
-For this owner's full-automation goals, the game stages and what reaches each
-one live in the library's knowledge `stage` category (`stage-manual-bootstrap`
-through `stage-sustained-consumption`); classify the base there and reread the
-current stage when it changes. Owner bar: no agent fuel runs to individual
-machines; manual priming is a declared finite bootstrap only. Electric miners
+The harness and its prompts stay generic: they point the operator to the
+library before each new part of a goal and name no category or entry. The
+library declares its own knowledge categories, listed in `factorio_capabilities`.
+Goal acceptance belongs in the goal text given to the operator, including this
+owner's full-automation bar: no agent fuel runs to individual machines; manual
+priming is a declared finite bootstrap only. Electric miners
 reuse `getPlacementCandidates` and `place_candidate` with native fluid-port
 preservation, not the nonfluid coordinate shortcut. See the
 [read-only library guide](docs/EXTERNAL_HARNESS.md#read-only-method-library).

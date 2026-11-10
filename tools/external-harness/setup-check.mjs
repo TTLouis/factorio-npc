@@ -53,8 +53,9 @@ export async function checkSetup({ env = process.env, fresh = false, ...clientOp
         && actor?.mode === 'npc' && actor.actor?.kind === 'standalone_character' && actor.actor.valid === true
         && actor.actor.actor_id === context.actor.actor_id, 'setup_capabilities_invalid')
       if (fresh) requireCheck(actor.connected_players === 0, 'setup_humans_connected')
-      const knowledge = toolValue(await client.request('tools/call', { name: 'factorio_library', arguments: { kind: 'knowledge', action: 'get', id: 'knowledge-automation-progression-checkpoints' } }))
-      requireCheck(knowledge.kind === 'knowledge' && knowledge.entry?.id === 'knowledge-automation-progression-checkpoints'
+      // Content-agnostic: any library answers a bounded search with its advisory authority, matches or not.
+      const knowledge = toolValue(await client.request('tools/call', { name: 'factorio_library', arguments: { kind: 'knowledge', action: 'search', query: 'factorio', limit: 1 } }))
+      requireCheck(knowledge.kind === 'knowledge' && knowledge.action === 'search' && Array.isArray(knowledge.results)
         && knowledge.authority?.native_verified === false && knowledge.authority?.operation_authority === false, 'setup_library_invalid')
       return { context, tools: listed.result.tools, initialize: client.initialize.result }
     }, { env, ...clientOptions })

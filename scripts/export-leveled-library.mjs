@@ -15,9 +15,9 @@ const knowledge = module.LEVELED_KNOWLEDGE_DEFINITIONS.map(entry => ({
   known_failure_modes: entry.known_failure_modes, source: entry.source,
 }))
 const output = new URL('../packages/autorio/src/fixtures/leveled-library-v1.json', import.meta.url)
-const pack = { schema: 2, profile: 'leveled', default_enabled: false,
+const pack = { schema: 3, profile: 'leveled', default_enabled: false,
   description: 'Optional knowledge and skill methods. No recipes or ratios. Current tool availability and live facts remain mandatory.', knowledge, skills: module.LEVELED_SKILL_DEFINITIONS,
-  stages: module.PROGRESSION_STAGES }
+  knowledge_categories: [{ ...module.PROGRESSION_CATEGORY, records: module.PROGRESSION_STAGES }] }
 const json = `${JSON.stringify(pack, null, 2)}\n`
 if (process.argv.includes('--check')) {
   if (readFileSync(output, 'utf8').replaceAll('\r\n', '\n') !== json) throw new Error('Leveled library export is stale; run node scripts/export-leveled-library.mjs')

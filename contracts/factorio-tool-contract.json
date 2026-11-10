@@ -154,9 +154,8 @@
       "source": "packages/autorio/src/fixtures/leveled-library-v1.json",
       "knowledge": 9,
       "skills": 58,
-      "stages": 6,
       "knowledge_categories": [
-        "stage"
+        { "id": "stage", "ordered": true, "records": 6 }
       ],
       "result_bytes": 7168
     },
