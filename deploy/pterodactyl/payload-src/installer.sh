@@ -13,7 +13,7 @@ else
 fi
 NODE_VERSION="v24.21.0"
 PNPM_VERSION="10.30.1"
-SGLUNA_REF="ddd5a33d5e9c9b77d18bcdf3e3c8da65c4485dd6"
+SGLUNA_REF="fddfb6eda8ec522f5db794fccb46666231fad17e"
 REVISION="2026-11-10.goal-search-supply-probe"
 DEPLOYMENT_REVISION="sgluna-deploy-v8-npc-staging"
 WORK=""
