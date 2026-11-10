@@ -152,10 +152,11 @@
       "read_only": true,
       "advisory_only": true,
       "source": "packages/autorio/src/fixtures/leveled-library-v1.json",
-      "knowledge": 9,
+      "knowledge": 10,
       "skills": 58,
       "knowledge_categories": [
-        { "id": "stage", "ordered": true, "records": 6 }
+        { "id": "stage", "ordered": true, "records": 9 },
+        { "id": "user-goal", "ordered": false, "records": 3 }
       ],
       "result_bytes": 7168
     },
