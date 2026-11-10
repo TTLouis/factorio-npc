@@ -85,32 +85,26 @@ receipts do.
 
 ## Latest proof
 
-### Electrified starter base with automatic red science
+### Electrified starter base with automatic red and green science
 
-**November 5, 2026 · External harness · Factorio 2.0.77**
+**November 9, 2026 · External harness · Factorio 2.1.24**
 
 | New science packs | Hands-off measurement | Delivery |
 | :---: | :---: | :---: |
-| **21** | **10 min 19 sec** | **Electric mining, automatic fuel and lab feed** |
+| **120 red and 100 green** | **20 game minutes** | **Electric mining, automatic fuel and lab feed** |
 
-The external operator built a starter base from an empty NPC inventory in a
-fresh world, with electric coal, iron and copper mining. After construction,
-the assembler produced 21 new packs during an independent hands-off window at
-normal game speed, with automatic furnace and boiler fuel service and science
-delivered to a researching lab.
+The external operator built an electrified starter base from vanilla crash-site
+supplies. After construction, the base ran steam power, belt-fed smelting,
+science production and research during a hands-off measurement with zero
+humans and no operator calls.
 
-![Preserved electric mining, smelting, assemblers and lab delivery](docs/proofs/images/2026-11-05-electrified/science-and-smelting.jpg)
-
-*Inspection screenshot of the preserved post-stop world. Production counts
-come from the original native measurements, not the screenshot.*
+![Post-stop view of Trial 6 showing electric mining, smelting, science and steam power](docs/proofs/images/2026-11-09-electrified-red-green/base-overview.jpg)
 
 > [!NOTE]
-> **Limits:** one furnace per ore, one electric coal drill and a self-fuelling
-> burner inserter at the boiler. Output was modest; compatibility with later
-> first-player crash-site creation remains unproven. This external-operator
-> result does not validate built-in plan or pursuit mode.
+> **Limits:** production fell short of the trial’s throughput targets. The
+> layout had limited space to expand and an unintended belt connection.
 
-**[Read the proof and screenshots](docs/proofs/2026-11-05-electrified-starter-base.md)
+**[Read the Trial 6 proof](docs/proofs/2026-11-09-electrified-red-green-science.md)
 · [Browse all proofs](docs/proofs/README.md)**
 
 ---
