@@ -207,6 +207,9 @@ test('a receipt names the entity its own placement created, and only its own', a
     assert.equal(unrelated.evidence.basic_operation, undefined)
     assert.equal(unrelated.state, 'completed')
   }
+  // Sol review: a modded name is reported as the game names it, not as unknown.
+  f.state.status.basic_operation = { last_result: { ...placedResult, entity_name: 'MyMod-Furnace' }, next_operation_id: 11 }
+  assert.equal((await f.bridge.receipt(prepared.pending)).placed_entity.entity_name, 'MyMod-Furnace')
 })
 
 test('same key with wrong signature is uncertain, unrelated receipts do not count', async () => {
@@ -904,7 +907,7 @@ test('place_line parses exact bounded arguments, fills defaults and renders one 
   ]) assert.throws(() => parseExternalOperation({ name: 'place_line', args }), JSON.stringify(args))
   const catalog = capabilities()
   assert.equal(catalog.limits.line_domain, 'native-nonfluid-non-overlapping')
-  assert.equal(parseExternalOperation({ name: 'place_line', args: { ...line.args, entity_name: 'stone-furnace', spacing: 2 } }).args.entity_name, 'stone-furnace')
+  for (const name of ['stone-furnace', 'MyMod-Furnace']) assert.equal(parseExternalOperation({ name: 'place_line', args: { ...line.args, entity_name: name, spacing: 2 } }).args.entity_name, name)
   assert.equal(catalog.limits.line_count, 32)
   assert.equal(catalog.limits.line_spacing, 8)
   assert.ok(catalog.operations.find(item => item.name === 'place_line').external_only)

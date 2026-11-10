@@ -64,7 +64,7 @@ beforeEach(() => {
   ground = []
   solid = []
   water = []
-  ;(globalThis as any).prototypes = { entity: { 'transport-belt': { collision_mask: { layers: { object: true, water_tile: true } } } } }
+  ;(globalThis as any).prototypes = { entity: { 'transport-belt': { collision_mask: { layers: { object: true, water_tile: true } } }, 'wide-machine': {}, 'MyMod-Furnace': {} } }
   standing.clear()
 })
 
@@ -92,9 +92,11 @@ describe('external line placement', () => {
     // No prototype list: a wider prototype lines when spacing clears its footprint, and refuses before anything when not.
     expect(line_placement_preflight(actor, { ...args, entity_name: 'wide-machine' })).toMatchObject({ ok: true })
     expect(line_placement_preflight(actor, { ...args, entity_name: 'wide-machine', spacing: 1 })).toMatchObject({ ok: false, code: 'line_tiles_overlap', tile_index: 1 })
+    // Sol review: a modded name the bridge accepts (uppercase) is accepted here too; the registry decides existence.
+    expect(line_placement_preflight(actor, { ...args, entity_name: 'MyMod-Furnace' })).toMatchObject({ ok: true })
     solid = [{ x: 6.5, y: -3.5 }]
     expect(line_placement_preflight(actor, { ...args, x: 2.25 })).toMatchObject({ ok: false, code: 'exact_grid_required', tile_index: 0 })
-    for (const bad of [{ count: 33 }, { count: 0 }, { spacing: 9 }, { entity_name: 'Not A Name' }, { entity_name: '' }, { line_direction: 2 }, { direction: 6 }]) {
+    for (const bad of [{ count: 33 }, { count: 0 }, { spacing: 9 }, { entity_name: 'no-such-entity' }, { entity_name: 'transport-belt\u0001' }, { entity_name: '' }, { entity_name: 'x'.repeat(201) }, { line_direction: 2 }, { direction: 6 }]) {
       expect(line_placement_preflight(actor, { ...args, ...bad })).toMatchObject({ ok: false, code: 'invalid_line_args' })
     }
   })

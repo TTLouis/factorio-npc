@@ -22,14 +22,15 @@ import { placement_item_preflight, planned_placement_footprint } from './placeme
 // Only the external bridge calls this; the internal planner catalog does not expose it.
 
 // No prototype list: any prototype with a proven nonfluid footprint may be lined, one per tile, provided consecutive
-// footprints do not overlap (line_tiles_overlap). The bridge checks entity_name is a name; the game decides the rest.
-const NAME_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789_-'
+// footprints do not overlap (line_tiles_overlap). The name rule is the bridge's factorioName (1-200 characters, no
+// control characters, so modded names fit); the prototype registry, not a character set, decides that it exists.
 function prototype_name(value: unknown): value is string {
-  if (typeof value !== 'string' || value.length < 1 || value.length > 100) return false
+  if (typeof value !== 'string' || value.length < 1 || value.length > 200) return false
   for (let i = 0; i < value.length; i++) {
-    if (!NAME_CHARS.includes(value.charAt(i))) return false
+    const code = value.charCodeAt(i)
+    if (code < 32 || code === 127) return false
   }
-  return true
+  return protected_read(() => prototypes.entity[value]) !== undefined
 }
 // history must be at least ADMISSION_LIMITS.history: a line's record is its completion evidence, so it may not be evicted
 // while its admission is still retained (Sol review: the 33rd line made the first one's receipt uncertain and fenced

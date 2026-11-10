@@ -231,6 +231,10 @@ const PREFLIGHT_HINTS = Object.freeze({
 })
 
 function prototypeName(value) { return typeof value === 'string' && /^[a-z0-9_-]{1,100}$/.test(value) ? value : 'unknown' }
+// Entity and item names as the game reports them: modded names keep their case, digits and _ - . up to the
+// factorioName length (200). Native text reaching the model stays pattern-checked, so anything else (spaces,
+// punctuation) reads 'unknown'. Codes and engine types keep the strict lowercase prototypeName rule.
+function gameName(value) { return typeof value === 'string' && /^[A-Za-z0-9_.-]{1,200}$/.test(value) ? value : 'unknown' }
 
 // Resource tiles under a candidate footprint, by name (trial 4r: buildings landed on the ore patch with no way to see it).
 // A footprint box covers at most a few dozen tiles; the list is bounded anyway.
@@ -238,15 +242,15 @@ function resourceCoverage(rows) {
   const list = array(rows)
   if (!Array.isArray(list)) return []
   return list.slice(0, 8).filter(row => object(row) && Number.isSafeInteger(row.tiles) && row.tiles > 0)
-    .map(row => ({ name: prototypeName(row.name), tiles: Math.min(row.tiles, 256) }))
+    .map(row => ({ name: gameName(row.name), tiles: Math.min(row.tiles, 256) }))
 }
 
 function footprintBlockers(rows) {
   return (Array.isArray(rows) ? rows : []).slice(0, 8).map(row => ({
-    name: prototypeName(row?.name), type: prototypeName(row?.type),
+    name: gameName(row?.name), type: prototypeName(row?.type),
     ...(Number.isFinite(row?.position?.x) && Number.isFinite(row?.position?.y) ? { position: { x: row.position.x, y: row.position.y } } : {}),
     ...(Number.isSafeInteger(row?.unit_number) ? { unit_number: row.unit_number } : {}),
-    ...(typeof row?.item === 'string' ? { item: prototypeName(row.item) } : {}) }))
+    ...(typeof row?.item === 'string' ? { item: gameName(row.item) } : {}) }))
 }
 
 function preflightFailure(preflight) {
@@ -257,7 +261,7 @@ function preflightFailure(preflight) {
   // place_line: which tile refused, and the item accounting for the whole line.
   const tile = Number.isSafeInteger(preflight?.tile_index) && preflight.tile_index >= 0 ? preflight.tile_index : undefined
   const item = object(preflight?.placement_item) && [preflight.placement_item.required_count, preflight.placement_item.held_count].every(Number.isSafeInteger)
-    ? { item_name: prototypeName(preflight.placement_item.item_name), required_count: preflight.placement_item.required_count, held_count: preflight.placement_item.held_count } : undefined
+    ? { item_name: gameName(preflight.placement_item.item_name), required_count: preflight.placement_item.required_count, held_count: preflight.placement_item.held_count } : undefined
   const field = typeof preflight?.field === 'string' && /^[a-z_]{1,40}$/.test(preflight.field) ? preflight.field : undefined
   const where = tile !== undefined ? ` Line tile ${tile} refused.` : ''
   const counts = item && code === 'line_placement_items_insufficient' ? ` Requires ${item.required_count} ${item.item_name}, holds ${item.held_count}.` : ''
@@ -690,7 +694,7 @@ export class NativeBridge {
     const correlated = object(last) && typeof last.placed_batch_ref === 'string' && refs.some(ref => ref.batch_ref === last.placed_batch_ref
       && ref.batch_id === last.placed_batch_id && ref.batch_generation === last.placed_batch_generation) ? last : undefined
     const placed = correlated?.completed === true && Number.isSafeInteger(correlated.placed_unit_number)
-      ? { unit_number: correlated.placed_unit_number, entity_name: prototypeName(correlated.entity_name), entity_type: prototypeName(correlated.placed_entity_type),
+      ? { unit_number: correlated.placed_unit_number, entity_name: gameName(correlated.entity_name), entity_type: prototypeName(correlated.placed_entity_type),
         ...(Number.isFinite(correlated.placed_position?.x) && Number.isFinite(correlated.placed_position?.y) ? { position: { x: correlated.placed_position.x, y: correlated.placed_position.y } } : {}),
         ...(Number.isSafeInteger(correlated.placed_direction) ? { direction: correlated.placed_direction } : {}), source: 'native_placement_result' }
       : undefined
