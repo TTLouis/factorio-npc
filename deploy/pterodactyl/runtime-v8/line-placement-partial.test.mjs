@@ -8,7 +8,7 @@ import { operationSignature, reconcilePendingOperation, reconciliationFacts, rec
 // place_line slot, one cancelled all-placing receipt, idle queues, and placed + missing indexes forming a prefix no longer than
 // the tasks started, with the rest never placed. Anything else is not taken on trust.
 
-const ay = JSON.parse(fs.readFileSync(new URL('./fixtures/ay-navigation.json', import.meta.url), 'utf8').replace(/^﻿/, ''))
+const ay = JSON.parse(fs.readFileSync(new URL('./fixtures/ay-navigation.json', import.meta.url), 'utf8').replace(/^\ufeff/, ''))
 const ARGS = { entity_name: 'transport-belt', x: 2.5, y: -3.5, direction: 4, line_direction: 4, count: 4, spacing: 1 }
 
 function sealedCopy(receipt) {

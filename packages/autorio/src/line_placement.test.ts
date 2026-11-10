@@ -13,6 +13,7 @@ import {
 // strict every-tile preflight, validate-then-queue, first refusal only, the execution-time footprint re-check and the exact
 // batch settlement. The engine semantics are proven by the line-placement Factorio lane.
 const held = { count: 10 }
+const standing = new Set<number>()
 vi.mock('./placement_preflight', () => ({
   placement_item_preflight: (_actor: unknown, entity_name: string) => {
     const placement_item = { item_name: entity_name, count: 1, held_count: held.count }
@@ -31,7 +32,6 @@ vi.mock('./npc_vision', () => ({ find_world_entities: (surface: any, filters: an
 vi.mock('./area_reservations', () => ({ reservation_intersection: () => undefined }))
 vi.mock('./entity_reference', () => ({ resolve_recorded_entity: (unit_number: number) => standing.has(unit_number) ? { name: 'transport-belt' } : undefined }))
 
-const standing = new Set<number>()
 let ground: { x: number, y: number }[] = []
 let solid: { x: number, y: number }[] = []
 let water: { x: number, y: number }[] = []

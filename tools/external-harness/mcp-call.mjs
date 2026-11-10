@@ -43,6 +43,8 @@ export async function withMcpClient(action, { command = process.execPath, args =
   let primaryError
   let cleanupCode
   let result
+  // Child stderr is never logged or returned; its first 4 KiB is kept only to read the one lock-holder line.
+  let stderr = ''
   const exit = new Promise(resolve => {
     child.once('error', () => { exited = true; stop(fail('mcp_start_failed')); resolve(null) })
     child.once('close', code => {
@@ -57,8 +59,6 @@ export async function withMcpClient(action, { command = process.execPath, args =
     for (const entry of pending.values()) { clearTimeout(entry.timer); entry.reject(error) }
     pending.clear()
   }
-  // Child stderr is never logged or returned; its first 4 KiB is kept only to read the one lock-holder line.
-  let stderr = ''
   child.stderr.on('data', chunk => { if (stderr.length < 4096) stderr = (stderr + chunk).slice(0, 4096) })
   child.stdin.on('error', () => stop(fail('mcp_input_failed')))
   child.stdout.on('error', () => stop(fail('mcp_output_failed')))

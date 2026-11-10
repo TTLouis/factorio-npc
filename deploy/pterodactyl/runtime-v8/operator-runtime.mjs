@@ -113,7 +113,7 @@ export async function lockHolder(lockPath, now = Date.now()) {
     const raw = await fs.readFile(lockPath, 'utf8')
     if (Buffer.byteLength(raw) > 4096) return {}
     const held = JSON.parse(raw)
-    const started = typeof held?.started_at === 'string' ? Date.parse(held.started_at) : NaN
+    const started = typeof held?.started_at === 'string' ? Date.parse(held.started_at) : Number.NaN
     return { ...(Number.isSafeInteger(held?.pid) && held.pid > 0 ? { pid: held.pid } : {}),
       ...(typeof held?.call === 'string' && CALL_LABEL.test(held.call) ? { call: held.call } : {}),
       ...(Number.isFinite(started) && now >= started ? { held_seconds: Math.round((now - started) / 1000) } : {}) }

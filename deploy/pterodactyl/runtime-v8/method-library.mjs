@@ -94,7 +94,7 @@ function related(entry, links) {
 }
 function card(entry, links) {
   return { kind: entry.content_type, ...(entry.category ? { category: entry.category, order: entry.order } : {}), id: entry.id, name: entry.name,
-    summary: entry.summary.slice(0, 400), ...(entry.summary.length > 400 ? { summary_truncated: true } : {}), level: entry.level,
+    summary: entry.summary.slice(0, 400), ...(entry.summary.length > 400 ? { summary_truncated: true } : {}), ...(entry.level !== undefined ? { level: entry.level } : {}),
     related_ids: related(entry, links) }
 }
 function recordView(entry, category, byId) {
@@ -117,7 +117,7 @@ function view(entry, links) {
   return { ...common, goal_tags: entry.goal_tags, guidance: entry.guidance }
 }
 
-function search(input, entries, links) {
+function search(input, entries) {
   const query = normalize(input.query)
   const terms = query.split(' ')
   const matches = entries.map(entry => {
@@ -174,7 +174,7 @@ export function openLibrary({ file, source }) {
         results: entries.slice(0, limit).map(entry => card(entry, links)) }
     }
     else {
-      const matches = search(input, entries, links)
+      const matches = search(input, entries)
       const limit = input.limit ?? 5
       result = { ...base, query: input.query, ...(input.category ? { category: input.category } : {}), total_matches: matches.length, truncated: matches.length > limit,
         results: matches.slice(0, limit).map(entry => card(entry, links)) }

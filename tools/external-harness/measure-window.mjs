@@ -76,7 +76,9 @@ export async function measureWindow({ rcon, speed = 8, ticks = 72000, items = DE
   // The native guard owns the tick bound; the host owns the wall bound. A window
   // the server cannot accelerate still ends by wall time, as an invalid window.
   const wallDeadline = wallStarted + Math.ceil(ticks / 60) * 1000 + wallSlackMs
-  let status = armed, watchdog = false, readFailures = 0
+  let status = armed
+  let watchdog = false
+  let readFailures = 0
   while (status.lease?.measurement_id === measurementId) {
     await sleep(pollMs)
     if (now() > wallDeadline && !watchdog) { watchdog = true; status = JSON.parse(await rcon.command(finishCommand(measurementId))); continue }
@@ -124,7 +126,8 @@ export async function main(args = process.argv.slice(2), env = process.env) {
   if (args.includes('--help')) { process.stdout.write(HELP); return }
   const option = (name, fallback) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : fallback }
   const evidenceDir = option('--evidence')
-  const speed = Number(option('--speed', 8)), ticks = Number(option('--ticks', 72000))
+  const speed = Number(option('--speed', 8))
+  const ticks = Number(option('--ticks', 72000))
   if (!evidenceDir) throw new Error('evidence_directory_required')
   const host = env.SGLUNA_RCON_HOST ?? '127.0.0.1'
   if (!['127.0.0.1', '::1'].includes(host)) throw new Error('loopback_required')
