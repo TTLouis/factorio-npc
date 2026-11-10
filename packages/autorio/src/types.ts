@@ -3,7 +3,7 @@ import type { MapPositionStruct } from 'factorio:prototype'
 import type { LuaEntity, PathfinderWaypoint } from 'factorio:runtime'
 import type { ClearedEntity } from './placement_clearing'
 import type { GroundItem } from './placement_ground_items'
-import type { FluidQueuedBinding } from './operation_admission'
+import type { FluidQueuedBinding, ResearchAdmissionBinding } from './operation_admission'
 import type { EntityRemovalReceipt, RemovalBinding } from './entity_removal_receipt'
 
 export enum TaskStates {
@@ -351,6 +351,7 @@ export interface PlayerParametersAttackNearestEnemy {
 }
 
 export interface PlayerParametersResearchTechnology {
+  admission_binding?: ResearchAdmissionBinding
   type: TaskStates.RESEARCHING
   technology_name: string
   /** Monotonic Autorio request identifier used to correlate asynchronous native research. */
