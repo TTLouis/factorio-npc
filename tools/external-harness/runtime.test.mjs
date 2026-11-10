@@ -524,3 +524,55 @@ test('a running receipt with another reason gets no in-flight guidance', async t
   assert.equal(admitted.state, 'running'); assert.equal(admitted.reason, 'native_running')
   assert.equal(admitted.guidance, undefined); assert.equal(admitted.observed_progress, undefined, 'no before-observation, no progress')
 })
+
+// Hand-supply report: served from this session's journal, never from the game.
+test('getActorSupplies lists what the session moved into each entity from its own journal', async t => {
+  const f = await fixture(t); const runtime = await f.open()
+  const prepare = f.bridge.prepare
+  f.bridge.prepare = async (value, key) => ({ ...await prepare(value, key), observed_before: { tick: 100, actor_id: 1, position: { x: 0, y: 0 }, items: { coal: 30, 'automation-science-pack': 10 } } })
+  f.bridge.effectProbe = async () => ({ tick: 400, actor_id: 1, position: { x: 0, y: 0 }, items: { coal: 25, 'automation-science-pack': 10 } })
+  const fuel = { name: 'move_items_exact', args: { unit_number: 7, to_entity: true, item_name: 'coal', max_count: 5 } }
+  // The fake native task is busy while running and one receipt state covers every operation,
+  // so each operation completes before the next submit.
+  f.setState('completed')
+  const settle = async (request_id, value) => {
+    const admitted = await runtime.submit({ request_id, operation: value })
+    await runtime.get({ operation_id: admitted.operation_id })
+    return admitted
+  }
+  const first = await settle('fuel-1', fuel)
+  f.bridge.effectProbe = async () => ({ tick: 500, actor_id: 1, position: { x: 0, y: 0 }, items: { coal: 30, 'automation-science-pack': 10 } })
+  await settle('take', { name: 'move_items_exact', args: { unit_number: 7, to_entity: false, item_name: 'coal', max_count: 1 } })
+  await settle('wait', operation)
+  await settle('stock', { name: 'supply_entity', args: { unit_number: 9, items: [{ item_name: 'automation-science-pack', count: 4 }, { item_name: 'coal', count: 2 }] } })
+  f.bridge.observe = async () => { throw new Error('getActorSupplies must not call the game') }
+  f.bridge.snapshot = async () => { throw new Error('getActorSupplies must not read a snapshot') }
+
+  const report = await runtime.observe({ name: 'getActorSupplies', args: {} })
+  assert.equal(report.source, 'external_session_journal'); assert.equal(report.world_read, false); assert.equal(report.current_world_verified, false)
+  assert.equal(report.operations, 2); assert.equal(report.entity_count, 2); assert.equal(report.truncated, false)
+  assert.deepEqual(report.entities.map(entity => entity.unit_number), [9, 7], 'most recently supplied first')
+  const [chest, furnace] = report.entities
+  assert.deepEqual(furnace.states, { completed: 1 })
+  assert.equal(furnace.last_operation_id, first.operation_id)
+  assert.deepEqual(furnace.items, [{ item_name: 'coal', requested: 5, actor_decrease: 5, observed_operations: 1 }])
+  // Observed with no actor drop: the row reports the observation, not an assumed transfer.
+  assert.deepEqual(chest.items, [{ item_name: 'automation-science-pack', requested: 4, actor_decrease: 0, observed_operations: 1 },
+    { item_name: 'coal', requested: 2, actor_decrease: 0, observed_operations: 1 }])
+  assert.deepEqual(chest.states, { completed: 1 })
+
+  const one = await runtime.observe({ name: 'getActorSupplies', args: { unit_number: 7 } })
+  assert.equal(one.unit_number, 7); assert.deepEqual(one.entities.map(entity => entity.unit_number), [7])
+  assert.equal((await runtime.observe({ name: 'getActorSupplies', args: { unit_number: 8 } })).entity_count, 0)
+  for (const args of [{ unit_number: 0 }, { unit_number: 'seven' }, { radius: 3 }, []]) {
+    await assert.rejects(runtime.observe({ name: 'getActorSupplies', args }), { code: 'invalid_observation_arguments' })
+  }
+})
+
+test('getActorSupplies leaves out supplies that never reached the game', async t => {
+  const f = await fixture(t); const runtime = await f.open()
+  f.setSendError(Object.assign(new Error('refused'), { code: 'native_refused', notAdmitted: true }))
+  assert.equal((await runtime.submit({ request_id: 'refused', operation: { name: 'supply_entity', args: { unit_number: 3, items: [{ item_name: 'coal', count: 5 }] } } })).state, 'rejected')
+  const report = await runtime.observe({ name: 'getActorSupplies' })
+  assert.deepEqual([report.operations, report.entity_count, report.entities], [0, 0, []])
+})

@@ -455,6 +455,16 @@ force sees live now (near the actor, or radar coverage): `entity_not_visible`
 means there is no live vision there, not that the entity is gone. Status names
 are the native `defines.entity_status` values.
 
+`getActorSupplies` is the one observation not read from the game. The runtime
+serves it from this session's own operation journal: one row per entity that the
+NPC's operations moved items into (`move_items_exact` with `to_entity: true`, and
+`supply_entity`), most recent first, with the items requested and the actor
+inventory drop observed around each terminal operation. Fuel, science packs and
+chest stocking all appear; what counts against a goal is library content, not a
+harness rule. Refusals that never reached the game are left out, `state` is as
+last recorded, and `unit_number` narrows it to one entity. The result is
+labelled `world_read: false`.
+
 ## Read-only method library
 
 `factorio_library` exposes separate `knowledge` references and `skill` methods.
@@ -465,7 +475,9 @@ knowledge categories; `factorio_capabilities` lists them under
 whether they are ordered. A search with `kind: "knowledge"` and a `category`
 lists that category's records without a query, or searches only them with one.
 A record's `get` returns its authored fields, the methods it names and, for an
-ordered category, its position and neighbours. An unknown category is refused
+ordered category, its position and neighbours. A category listing returns the
+whole category unless a `limit` is given; a pack may declare at most sixteen
+records per category. An unknown category is refused
 with `library_category_not_found`. Search cards are bounded;
 full entries are returned intact or refused above 7 KiB. A get call does not
 accept query/limit, and a search does not accept an ID. No full catalog is added
@@ -483,7 +495,13 @@ source revision. The loader knows no category, entry or count by name: it valida
 structure (schema, unique ids, method and related ids that resolve, bounded
 size) and reports what the pack contains, so a different library loads through
 the same code (`openLibrary({ file, source })`). The shipped library's
-`stage` category holds ordered game stages. `factorio_library` reads its exported fixture
+`stage` category holds ordered game stages, from the first manual steps through
+fluid processing and advanced production to the win condition. Its `user-goal`
+category says what common user goals (a starter base, automated research,
+finishing the game) mean: how to size them from live facts, when they are done
+and what does not count. A knowledge entry on what counts as automatic carries
+the full-automation bar, so a short user goal needs no acceptance rules
+appended. `factorio_library` reads its exported fixture
 `packages/autorio/src/fixtures/leveled-library-v1.json`; see
 [the local library](../tools/external-harness/library/README.md) for the source
 and regeneration. Source IDs are retained in each entry. Full skill
@@ -493,8 +511,9 @@ current availability, live facts, native mastery or permission to act.
 
 The MCP instructions point the operator to the library before each new part
 of a goal and name no category or entry. Goal acceptance is not a harness
-prompt: state it in the goal text. For this owner's full-automation goals that
-text carries the owner bar: the agent must not fuel individual machines as the
+prompt. The library's goal records and automatic-supply knowledge carry the
+reusable meaning; a goal text may add stricter acceptance of its own. For this
+owner's full-automation goals the bar is: the agent must not fuel individual machines as the
 operating design, and initial manual priming is a declared finite bootstrap
 phase only. Prefilled stocks or a short production demonstration do not
 establish full automation.
