@@ -3,6 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { new_research_controller } from './research'
 import { new_task_manager } from './task_manager'
 import { TaskStates } from './types'
+import { new_operation_admission } from './operation_admission'
+// @ts-expect-error runtime reconciliation is shipped JavaScript
+import { reconcilePendingOperation, unresolvedNativeAdmissions } from '../../../deploy/pterodactyl/runtime-v8/operation-reconciliation.mjs'
 
 beforeEach(() => {
   ;(globalThis as any).storage = {}
@@ -426,5 +429,103 @@ describe('research unlock facts', () => {
     expect(status.available[0]).toMatchObject({ name: 'logistics' })
     expect(status.available[1]).toMatchObject({ name: 'automation', unlocks_truncated: true })
     expect(status.available[1].unlocks).toHaveLength(12)
+  })
+})
+
+
+describe('Trial 7 exact research refusal settlement', () => {
+  function admitted(mode = 'exact') {
+    const f = world()
+    ;(f.actor.character as any).valid = true
+    ;(globalThis as any).remote = { interfaces: { sgluna_deployment: { authorize: true } }, call: vi.fn(() => true) }
+    const admission = new_operation_admission(() => f.actor, () => f.manager.get_status_snapshot())
+    const pending = { protocol_version: 2, operation_key: 'ext-158/1', attempt_id: 'attempt-1', signature: 'sig-1', ordinal: 1,
+      actor: { actor_id: 42, epoch: 1 }, operations: [{ name: 'research_technology', args: { technology_name: 'automation' } }] }
+    if (mode === 'mixed') pending.operations.push({ name: 'wait', args: { ticks: 1 } } as any)
+    const correlation = { ...pending, actor_id: 42, epoch: 1, operation_count: pending.operations.length }
+    expect(admission.begin(correlation).ok).toBe(true)
+    const other = { ...f.tech, name: 'logistics' }
+    f.force.current_research = other
+    f.force.research_queue = [other]
+    f.force.add_research = vi.fn(() => {
+      if (mode === 'partial') f.force.research_queue.push(f.tech)
+      if (mode === 'changed') f.force.research_progress = 0.5
+      return mode === 'true_without_append'
+    })
+    expect(f.controller.submit('automation')[0]).toBe(true)
+    const active = f.manager.get_status_snapshot().active_batch!
+    admission.slot(pending.operation_key, 1, { ok: true, operation: 'research_technology', batch_refs: [active] })
+    if (mode === 'mixed') {
+      f.manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 1 })
+      admission.slot(pending.operation_key, 2, { ok: true, operation: 'wait', batch_refs: [active] })
+    }
+    expect(admission.finish(pending.operation_key, { ok: true }).ok).toBe(true)
+    const task = f.manager.player_state.parameters_research_technology!
+    if (mode === 'legacy') delete task.admission_binding
+    if (mode === 'wrong_request') task.request_id!++
+    if (mode === 'wrong_attempt') task.admission_binding!.attempt_id = 'other'
+    if (mode === 'stale_epoch') (globalThis as any).remote.call.mockReturnValue(false)
+    f.controller.tick(f.actor)
+    const status = { ...f.manager.get_status_snapshot(), admission_journal: admission.status().records }
+    return { ...f, admission, pending, status, verdict: reconcilePendingOperation(pending, { status, actor: pending.actor }) }
+  }
+  it('settles the real callback once, persists terminal admission, continues and permits an idle stop', () => {
+    const f = admitted()
+    expect(f.controller.status()).toMatchObject({ last_request_result: { accepted: false, code: 'force_busy', no_effect: true } })
+    expect(f.verdict).toMatchObject({ verdict: 'refused_before_mutation', effect: 'not_happened' })
+    expect((globalThis as any).storage.sgluna_operation_admissions[0]).toMatchObject({ state: 'failed', proven_refusal: true })
+    expect(unresolvedNativeAdmissions(f.status, [f.pending], f.pending.actor)).toEqual([])
+    f.controller.tick(f.actor)
+    expect(f.force.add_research).toHaveBeenCalledTimes(1)
+    expect(f.admission.begin({ ...f.pending, actor_id: 42, epoch: 1, operation_count: 1 }).duplicate).toBe(true)
+    ;(globalThis as any).storage = JSON.parse(JSON.stringify((globalThis as any).storage))
+    expect(f.admission.status().records[0].state).toBe('failed')
+    expect(f.admission.begin({ ...f.pending, operation_key: 'next/1', attempt_id: 'next', actor_id: 42, epoch: 1, operation_count: 1, ordinal: 2 }).ok).toBe(true)
+    f.manager.add_task({ type: TaskStates.WAITING, remaining_ticks: 1 })
+    expect(f.manager.player_state.task_state).toBe(TaskStates.WAITING)
+    expect((globalThis as any).log).toHaveBeenCalledWith(expect.stringContaining('research.rejection_settled request_id=ext-158'))
+  })
+  it.each(['partial', 'changed', 'true_without_append', 'mixed', 'legacy', 'wrong_request', 'wrong_attempt', 'stale_epoch'])('keeps %s fenced without repeating research', mode => {
+    const f = admitted(mode)
+    expect(f.status.admission_journal[0].state).toBe('uncertain')
+    expect(f.verdict).toMatchObject({ verdict: 'admitted_cancelled', reason: 'exact_batch_cancelled', effect: 'partial_unknown' })
+    ;(globalThis as any).storage = JSON.parse(JSON.stringify((globalThis as any).storage))
+    const restored = { ...f.manager.get_status_snapshot(), admission_journal: f.admission.status().records }
+    expect(restored.admission_journal[0].state).toBe('uncertain')
+    expect(reconcilePendingOperation(f.pending, { status: restored, actor: f.pending.actor })).toMatchObject({
+      verdict: 'admitted_cancelled', reason: 'exact_batch_cancelled', effect: 'partial_unknown',
+    })
+    expect(unresolvedNativeAdmissions(f.status, [f.pending], f.pending.actor)).toHaveLength(1)
+    f.controller.tick(f.actor)
+    expect(f.force.add_research).toHaveBeenCalledTimes(['wrong_request', 'wrong_attempt', 'stale_epoch'].includes(mode) ? 0 : 1)
+  })
+  it('requires readable exact idle receipts on the host and preserves actor/epoch fences', () => {
+    const f = admitted()
+    for (const change of [
+      (s: any) => { s.queue_length = 1 },
+      (s: any) => { s.receipt_journal[0].research_request_id++ },
+      (s: any) => { s.receipt_journal.push({ ...s.receipt_journal[0] }) },
+      (s: any) => { s.receipt_journal = []; delete s.admission_journal[0].research_receipt },
+    ]) {
+      const status = JSON.parse(JSON.stringify(f.status)); change(status)
+      expect(reconcilePendingOperation(f.pending, { status, actor: f.pending.actor }).effect).not.toBe('not_happened')
+    }
+    expect(reconcilePendingOperation(f.pending, { status: f.status, actor: { actor_id: 42, epoch: 2 } }).reason).toBe('actor_epoch_changed')
+    const restored = JSON.parse(JSON.stringify(f.status)); restored.batch_generation++; restored.receipt_journal = []
+    expect(reconcilePendingOperation(f.pending, { status: restored, actor: { actor_id: 42, epoch: 2 } }).effect).toBe('not_happened')
+    delete restored.admission_journal[0].research_receipt
+    expect(reconcilePendingOperation(f.pending, { status: restored, actor: { actor_id: 42, epoch: 2 } }).effect).not.toBe('not_happened')
+  })
+  it('prevents a known disabled technology before admission, retaining duplicate no-ops', () => {
+    const f = world()
+    f.tech.enabled = false
+    f.force.current_research = { ...f.tech, name: 'logistics' }
+    f.force.research_queue = [f.force.current_research]
+    expect(f.controller.submit('automation')[0]).toBe(false)
+    expect(f.force.add_research).not.toHaveBeenCalled()
+    f.tech.enabled = true
+    f.force.current_research = f.tech
+    f.force.research_queue = [f.tech]
+    expect(f.controller.submit('automation')[0]).toBe(true)
   })
 })

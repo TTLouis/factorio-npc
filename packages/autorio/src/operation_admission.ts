@@ -37,6 +37,18 @@ export interface OperationCorrelation {
   surface_index?: number
   fluid_preservation?: FluidPreservationOwner
 }
+export interface ResearchAdmissionBinding {
+  operation_key: string
+  attempt_id: string
+  signature: string
+  ordinal: number
+  actor_id: number
+  epoch: number
+  request_id: number
+  technology: string
+  force_index: number
+  actor_kind: string
+}
 export interface AdmissionSlot {
   /** Native-only origin at actual gather submission, not an earlier host preflight. */
   gather_search_origin?: { x: number, y: number, surface_index: number, force_index: number, tick: number }
@@ -60,6 +72,8 @@ export type AdmissionSlotInput = Omit<AdmissionSlot, 'index' | 'refused_before_m
   refused?: boolean
 }
 export interface OperationAdmission extends OperationCorrelation {
+  research_request?: ResearchAdmissionBinding
+  research_receipt?: TaskBatchReceipt
   entity_removal?: EntityRemovalReceipt
   state: 'admitting' | 'admitted' | 'uncertain' | 'completed' | 'failed' | 'partial' | 'not_admitted'
   generation: number
@@ -115,13 +129,13 @@ export interface OperationAdmission extends OperationCorrelation {
 }
 // Operations whose submission validates, then either queues a task or returns a
 // refusal without touching the world. A refusal from any other operation
-// (equip, research, follow, composite plans, ...) may follow a partial change.
+// (equip, follow, composite plans, ...) may follow a partial change.
 // place_line checks every tile, then queues one placing task per tile or returns its refusal before queueing any.
 // pick_up_ground_items re-reads its box, then queues one task or returns its refusal.
 export const PURE_SUBMIT_OPERATIONS = [
   'place_entity', 'mine_entity', 'mine_entity_exact', 'mine_resource_at', 'rotate_entity', 'move_items', 'move_items_exact',
   'move_items_with_player', 'set_machine_recipe', 'launch_rocket', 'wait', 'craft_item',
-  'harvest_product', 'place_line', 'pick_up_ground_items',
+  'harvest_product', 'place_line', 'pick_up_ground_items', 'research_technology',
 ]
 // supply_entity's successful submission only queues submit_move_exact calls.
 // Its failed submission can cancel a prefix, so it is deliberately NOT added
@@ -161,6 +175,61 @@ export function current_fluid_owner(actor: ControlledActor, owner: FluidPreserva
 // Module state deliberately disappears on load; journal history alone cannot
 // resurrect a previously admitting operation as a current caller.
 let current_admitting_key: string | undefined
+
+// Only a singleton research submission may use this no-effect settlement. Old
+// saved tasks and composite admissions have no binding and remain conservative.
+export function bind_research_admission(actor: ControlledActor, request_id: number, technology: string) {
+  const record = journal().find(row => row.operation_key === current_admitting_key)
+  const identity = actor.status_snapshot()
+  if (!record || record.state !== 'admitting' || record.operation_count !== 1 || record.slots.length !== 0
+    || record.actor_id !== identity.actor_id) return undefined
+  const binding: ResearchAdmissionBinding = {
+    operation_key: record.operation_key, attempt_id: record.attempt_id, signature: record.signature,
+    ordinal: record.ordinal, actor_id: record.actor_id, epoch: record.epoch,
+    request_id, technology, force_index: actor.force.index, actor_kind: identity.kind,
+  }
+  record.research_request = { ...binding }
+  return binding
+}
+export function queued_research_admission(actor: ControlledActor, binding: ResearchAdmissionBinding | undefined, status: { batch_generation: number, active_batch?: Pick<TaskBatchReceipt, 'batch_generation' | 'batch_ref' | 'task_count' | 'task_types'> & { batch_id?: number } }) {
+  if (!binding || !actor.is_valid || actor.status_snapshot().actor_id !== binding.actor_id
+    || actor.status_snapshot().kind !== binding.actor_kind || actor.force.index !== binding.force_index
+    || !remote.interfaces.sgluna_deployment?.authorize
+    || remote.call('sgluna_deployment', 'authorize', binding.epoch) !== true) return undefined
+  const record = journal().find(row => row.operation_key === binding.operation_key)
+  const saved = record?.research_request
+  if (!record || !saved || record.state !== 'admitted' || record.operation_count !== 1
+    || !Object.keys(binding).every(key => binding[key as keyof ResearchAdmissionBinding] === saved[key as keyof ResearchAdmissionBinding])
+    || record.actor_id !== binding.actor_id || record.epoch !== binding.epoch || record.attempt_id !== binding.attempt_id
+    || record.signature !== binding.signature || record.ordinal !== binding.ordinal
+    || record.generation !== status.batch_generation || record.slots.length !== 1) return undefined
+  const slot = record.slots[0]
+  const ref = slot.batch_refs[0]
+  const active = status.active_batch
+  if (!slot.ok || slot.index !== 1 || slot.operation !== 'research_technology' || slot.queued_tasks !== 1 || slot.batch_refs.length !== 1
+    || !ref || !active || ref.batch_generation !== record.generation || ref.batch_id !== active.batch_id
+    || ref.batch_generation !== active.batch_generation || ref.batch_ref !== active.batch_ref
+    || active.task_count !== 1 || active.task_types.length !== 1 || active.task_types[0] !== 'researching') return undefined
+  return record
+}
+export function settle_research_refusal(record: OperationAdmission, receipt: TaskBatchReceipt | undefined) {
+  const binding = record.research_request
+  const ref = record.slots[0]?.batch_refs[0]
+  if (!binding || !ref || !receipt || !['admitted', 'uncertain'].includes(record.state) || receipt.batch_id !== ref.batch_id
+    || receipt.batch_generation !== ref.batch_generation || receipt.batch_ref !== ref.batch_ref
+    || receipt.task_count !== 1 || receipt.task_types.length !== 1 || receipt.task_types[0] !== 'researching'
+    || receipt.started_count !== 1 || receipt.tasks_started !== 1 || receipt.failed_task_index !== 0
+    || receipt.failed_before_mutation !== true || receipt.research_request_id !== binding.request_id
+    || receipt.research_technology !== binding.technology || receipt.tick < record.tick
+    || receipt.outcome !== undefined || receipt.refused_count !== undefined || (receipt.refusals?.length ?? 0) !== 0) return false
+  record.research_receipt = { ...receipt, state: 'cancelled', task_types: [...receipt.task_types] }
+  record.state = 'failed'
+  record.ok = false
+  record.proven_refusal = true
+  record.error = 'refused_before_mutation'
+  log(`[AUTORIO] research.rejection_settled request_id=${binding.operation_key.split('/')[0]} operation_key=${binding.operation_key} attempt_id=${binding.attempt_id} actor_id=${binding.actor_id} epoch=${binding.epoch} research_request_id=${binding.request_id} batch_ref=${receipt.batch_ref} reason=${receipt.reason} disposition=no_effect`)
+  return true
+}
 export function capture_removal_binding(actor: ControlledActor, status: any): RemovalBinding | undefined {
   const record = journal().find(row => row.operation_key === current_admitting_key)
   if (!record || record.state !== 'admitting' || record.operation_count !== 1 || record.slots.length !== 0
@@ -299,7 +368,7 @@ function cancelled_slot_prefix(record: OperationAdmission, receipt_for: (ref: Ta
   if (!ref) return undefined
   let queued = 0
   for (const slot of record.slots) {
-    if (!slot.ok || slot.operation === undefined || !PURE_SUBMIT_OPERATIONS.includes(slot.operation)) return undefined
+    if (!slot.ok || slot.operation === 'research_technology' || slot.operation === undefined || !PURE_SUBMIT_OPERATIONS.includes(slot.operation)) return undefined
     const tasks = slot.queued_tasks
     if (typeof tasks !== 'number' || tasks < 1 || tasks !== math.floor(tasks) || slot.batch_refs.length !== 1) return undefined
     const own = slot.batch_refs[0]
@@ -332,7 +401,7 @@ function reconcile_record(stored: OperationAdmission, status: { receipt_journal:
     record.state = 'completed'
   }
   else if (record.state === 'admitted' && refs.length > 0
-    && record.slots.every(slot => slot.ok && slot.batch_refs.length > 0 && slot.operation !== undefined && PURE_SUBMIT_OPERATIONS.includes(slot.operation))
+    && record.slots.every(slot => slot.ok && slot.batch_refs.length > 0 && slot.operation !== 'research_technology' && slot.operation !== undefined && PURE_SUBMIT_OPERATIONS.includes(slot.operation))
     && refs.every(ref => {
       const receipt = receipt_for(ref)
       return receipt?.state === 'cancelled' && receipt.started_count === 1 && receipt.failed_before_mutation === true

@@ -503,8 +503,36 @@ export function provenRefusal(admission, status) {
     return { applied_slots: slots.filter(slot => slot.ok === true).map(slot => slot.index), refused_slots: refused.map(slot => slot.index),
       refusal_codes: refused.map(slot => text(slot.refusal_code, 80)).filter(Boolean).slice(0, 4), unrun_slots: Math.max(0, (admission.operation_count ?? slots.length) - slots.length) }
   }
-  const receipts = Array.isArray(status?.receipt_journal) ? status.receipt_journal : []
+  let receipts = Array.isArray(status?.receipt_journal) ? status.receipt_journal : []
+  if (admission.research_request && admission.research_receipt && refs.length === 1
+    && Array.isArray(status?.receipt_journal) && !receipts.some(row => row.batch_ref === refs[0].batch_ref
+      || row.batch_id === refs[0].batch_id && row.batch_generation === refs[0].batch_generation)) receipts = [admission.research_receipt]
   if (!slots.every(slot => slot?.ok === true && Array.isArray(slot.batch_refs) && slot.batch_refs.length > 0)) return null
+  // Research no-effect is sealed at its synchronous native callback, never
+  // inferred from a last-result label or the technology's later absence.
+  if (slots.some(slot => slot.operation === 'research_technology')) {
+    const binding = admission.research_request
+    const ref = refs[0]
+    const matching = receipts.filter(receipt => receipt?.batch_ref === ref?.batch_ref
+      || receipt?.batch_id === ref?.batch_id && receipt?.batch_generation === ref?.batch_generation)
+    const receipt = matching[0]
+    if (admission.applied_slot_count !== undefined || status?.error || status?.status_error || !Array.isArray(status?.receipt_journal)
+      || !Number.isSafeInteger(admission.tick) || admission.tick < 0 || !Number.isSafeInteger(receipt?.tick)
+      || !Number.isSafeInteger(ref?.batch_id) || ref.batch_id < 1 || ref.batch_generation !== admission.generation
+      || ref.batch_ref !== `batch-g${ref.batch_generation}-${ref.batch_id}`
+      || slots.length !== 1 || admission.operation_count !== 1 || slots[0].index !== 1 || slots[0].queued_tasks !== 1 || refs.length !== 1
+      || !isRecord(binding) || !Number.isSafeInteger(binding.request_id) || binding.request_id < 1
+      || typeof binding.technology !== 'string' || !binding.technology
+      || binding.operation_key !== admission.operation_key || binding.attempt_id !== admission.attempt_id
+      || binding.signature !== admission.signature || binding.ordinal !== admission.ordinal
+      || binding.actor_id !== admission.actor_id || binding.epoch !== admission.epoch
+      || status?.task_state !== 'idle' || status?.queue_length !== 0 || status?.active_batch
+      || matching.length !== 1 || receipt.task_count !== 1 || receipt.tasks_started !== 1 || receipt.failed_task_index !== 0
+      || !Array.isArray(receipt.task_types) || receipt.task_types.length !== 1 || receipt.task_types[0] !== 'researching'
+      || receipt.research_request_id !== binding.request_id || receipt.research_technology !== binding.technology
+      || receipt.tick < admission.tick || receipt.outcome !== undefined || receipt.refused_count !== undefined
+      || (Array.isArray(receipt.refusals) && receipt.refusals.length > 0)) return null
+  }
   if (admission.applied_slot_count !== undefined) return cancelledSlotPrefix(admission, slots, receipts)
   const proven = refs.every(ref => receipts.some(receipt => receipt?.batch_ref === ref.batch_ref && receipt.batch_id === ref.batch_id
     && receipt.batch_generation === ref.batch_generation && receipt.state === 'cancelled' && receipt.started_count === 1
@@ -913,6 +941,15 @@ export function reconcilePendingOperation(pending, { status, actor } = {}) {
     if (admission.attempt_id !== pending.attempt_id || admission.signature !== pending.signature || admission.actor_id !== lineage.actor_id || admission.epoch !== lineage.epoch) {
       return { verdict: RECONCILE_VERDICT.UNKNOWN, effect: EFFECT.UNKNOWN, reason: 'admission_lineage_mismatch' }
     }
+    const research = admission.research_request
+    if (research && (pending.operations?.length !== 1 || pending.operations[0].name !== 'research_technology'
+      || (pending.operations[0].args ? pending.operations[0].args.technology_name !== research.technology
+        : pending.operations[0].identity !== operationIdentity({ name: 'research_technology', args: { technology_name: research.technology } })))) {
+      return { verdict: RECONCILE_VERDICT.UNKNOWN, effect: EFFECT.PARTIAL_UNKNOWN, reason: 'research_identity_mismatch' }
+    }
+    const historicalResearch = research && Number.isSafeInteger(admission.generation) && Number.isSafeInteger(status?.batch_generation)
+      && admission.generation < status.batch_generation && lineage.actor_id === actor.actor_id && actor.epoch >= lineage.epoch
+      && provenRefusal(admission, status)
     if (!Number.isSafeInteger(pending.ordinal) || pending.ordinal !== admission.ordinal || admission.operation_count !== pending.operations.length) {
       return { verdict: RECONCILE_VERDICT.UNKNOWN, effect: EFFECT.UNKNOWN, reason: 'operation_identity_incomplete' }
     }
@@ -923,7 +960,7 @@ export function reconcilePendingOperation(pending, { status, actor } = {}) {
         reason: 'exact_historical_receipts_completed', batch_id: batchId }
     }
     if (!Number.isSafeInteger(admission.generation) || !Number.isSafeInteger(status?.batch_generation)
-      || admission.generation !== status.batch_generation) {
+      || admission.generation !== status.batch_generation && !historicalResearch) {
       // A layout execution the mod sealed after a restart retired its batch: the sealed row and the batch's receipt identity
       // prove which nodes stand, for the actor that ran it, also across the boot's rebind (layoutReboundProven). The remainder is
       // then validated afresh, never replayed.
@@ -932,6 +969,7 @@ export function reconcilePendingOperation(pending, { status, actor } = {}) {
       return staleActor ?? { verdict: RECONCILE_VERDICT.GENERATION_CHANGED, effect: EFFECT.PARTIAL_UNKNOWN, reason: 'admission_generation_changed' }
     }
     // Exact refusal evidence is historical and needs no live actor: nothing refused changed anything.
+    if (staleActor && admission.research_request && !historicalResearch) return staleActor
     const refusal = provenRefusal(admission, status)
     if (refusal) {
       return { verdict: RECONCILE_VERDICT.REFUSED_BEFORE_MUTATION, effect: refusal.applied_slots.length > 0 ? EFFECT.HAPPENED : EFFECT.NOT_HAPPENED,

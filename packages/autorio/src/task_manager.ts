@@ -64,9 +64,13 @@ export interface TaskBatchReceipt extends TaskBatchIdentity {
    * completed and no later one began.
    */
   failed_task_index?: number
+  research_request_id?: number
+  research_technology?: string
 }
 
 export interface TaskCancelProof {
+  research_request_id?: number
+  research_technology?: string
   failed_before_mutation: boolean
   /** The failing task's index in its batch (batch_task_index), when it has one. */
   task_index?: number
@@ -239,6 +243,8 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
     if (execution().active_batch_tasks_started !== undefined) receipt.tasks_started = execution().active_batch_tasks_started
     if (kind === 'cancelled' && proof?.failed_before_mutation === true) {
       receipt.failed_before_mutation = true
+      receipt.research_request_id = proof.research_request_id
+      receipt.research_technology = proof.research_technology
       // The failing task names itself; it must also be the task running now.
       const current = execution().active_batch_current_task
       if (proof.task_index !== undefined && proof.task_index === current) receipt.failed_task_index = current
@@ -728,6 +734,7 @@ export function new_task_manager(get_controlled_actor: () => ControlledActor | u
       game.print(`[AUTORIO] Operation batch cancelled: ${details}`)
       log(`[AUTORIO] Operation batch cancelled: ${details}`)
     }
+    return receipt
   }
 
   function discard_all_tasks_after_actor_loss() {

@@ -35,7 +35,7 @@ function fixture(role = 'planner') {
 }
 
 test('typed reference projection refuses procedure and malformed results, and never imports authority fields', () => {
-  assert.equal(pack.knowledge.length, 9)
+  assert.equal(pack.knowledge.length, 10)
   for (const entry of pack.knowledge) assert.ok(compactKnowledge(entry, entry.id))
   for (const raw of [pack.skills[0], { ...reference, content_type: 'recipe' }, { ...reference, id: '../escape' }]) assert.equal(compactKnowledge(raw), undefined)
   assert.equal(compactLoadedSkill(reference), undefined)

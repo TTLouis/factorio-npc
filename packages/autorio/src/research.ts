@@ -3,6 +3,9 @@ import type { ControlledActor } from './actors/types'
 import type { new_task_manager } from './task_manager'
 import type { PlayerParametersResearchTechnology } from './types'
 import { TaskStates } from './types'
+import { batch_task_index } from './task_state_runtime'
+import { bind_research_admission, queued_research_admission, settle_research_refusal } from './operation_admission'
+import { protected_read } from './electric_facts'
 
 const MAX_RESEARCH_QUEUE = 10
 const MAX_TECHNOLOGY_RECORDS = 20
@@ -34,6 +37,7 @@ interface ResearchResult {
   observed_level?: number
   progress?: number
   by_script?: boolean
+  no_effect?: boolean
 }
 
 interface ResearchFollowThrough {
@@ -137,6 +141,24 @@ function force_busy(force: LuaForce) {
   return force.current_research !== undefined || (force.research_queue ?? []).length > 0
 }
 
+// Native snapshots bracket one synchronous add_research call: a false return
+// alone is not a no-effect proof. Missing/unreadable or altered state stays fenced.
+function research_snapshot(force: LuaForce, name: string) {
+  return protected_read(() => {
+    const tech = force.technologies[name]
+    const queue = force.research_queue
+    if (!tech || !Array.isArray(queue) || queue.length > 64) return undefined
+    return { current: force.current_research?.name, progress: force.research_progress,
+      queue: queue.map(entry => ({ name: entry.name, level: entry.level })),
+      researched: tech.researched, level: tech.level, saved_progress: tech.saved_progress }
+  })
+}
+function same_research_snapshot(left: ReturnType<typeof research_snapshot>, right: ReturnType<typeof research_snapshot>) {
+  return left !== undefined && right !== undefined && left.current === right.current && left.progress === right.progress
+    && left.researched === right.researched && left.level === right.level && left.saved_progress === right.saved_progress
+    && left.queue.length === right.queue.length
+    && left.queue.every((entry, index) => entry.name === right.queue[index].name && entry.level === right.queue[index].level)
+}
 function push_result(result: ResearchResult) {
   // Follow-through for an older asynchronous request may finish after a newer
   // request was submitted. Keep last_request_result pinned to the greatest
@@ -247,7 +269,7 @@ export function execute_research_request(actor: ControlledActor, task: PlayerPar
     })
   }
   const error = research_error(actor, task.technology_name)
-  if (error) return record_result(request_id, actor, task.technology_name, false, false, error)
+  if (error) return record_result(request_id, actor, task.technology_name, false, false, error, { no_effect: true })
 
   const force = actor.force
   const tech = force.technologies[task.technology_name]
@@ -279,9 +301,13 @@ export function execute_research_request(actor: ControlledActor, task: PlayerPar
   // Existing force research is never replaced or reordered: a busy force gets
   // this technology appended behind it, so the labs continue when it finishes.
   const behind = force_busy(force)
-  const accepted = force.add_research(tech) && queued(force, tech.name)
+  const before = research_snapshot(force, tech.name)
+  const added = force.add_research(tech)
+  const after = research_snapshot(force, tech.name)
+  const accepted = added && queued(force, tech.name)
   if (!accepted) {
     return record_result(request_id, actor, task.technology_name, false, false, behind ? 'force_busy' : 'engine_rejected', {
+      no_effect: added === false && !queued(force, tech.name) && same_research_snapshot(before, after) ? true : undefined,
       requested_level: task.requested_level,
       observed_level: tech.level,
     })
@@ -320,6 +346,7 @@ export function new_research_controller(get_actor: () => ControlledActor | undef
     const tech = actor.force.technologies[name]
     manager.add_task({
       type: TaskStates.RESEARCHING,
+      admission_binding: bind_research_admission(actor, request_id, name),
       request_id,
       technology_name: name,
       requested_level: tech.level,
@@ -337,9 +364,24 @@ export function new_research_controller(get_actor: () => ControlledActor | undef
   function tick(actor: ControlledActor) {
     const task = manager.player_state.parameters_research_technology
     if (!task || manager.player_state.task_state !== TaskStates.RESEARCHING) return
+    const admission = queued_research_admission(actor, task.admission_binding, manager.get_status_snapshot())
+    if (task.admission_binding && (!admission || task.request_id !== task.admission_binding.request_id
+      || task.technology_name !== task.admission_binding.technology)) {
+      manager.cancel_all_tasks('research:stale_admission_binding')
+      log(`[AUTORIO] research.rejection_fenced request_id=${task.admission_binding.operation_key.split('/')[0]} operation_key=${task.admission_binding.operation_key} research_request_id=${task.request_id} reason=stale_admission_binding disposition=uncertain`)
+      return
+    }
     const result = execute_research_request(actor, task)
     if (!result.accepted) {
-      manager.cancel_all_tasks()
+      const exact = admission && result.no_effect === true && result.request_id === task.admission_binding?.request_id
+        && result.technology === task.admission_binding.technology && result.actor_id === task.admission_binding.actor_id
+        && result.actor_kind === task.admission_binding.actor_kind && result.force_index === task.admission_binding.force_index
+        && queued_research_admission(actor, task.admission_binding, manager.get_status_snapshot()) === admission
+      const receipt = manager.cancel_all_tasks(`research:${result.code}`, exact ? {
+        failed_before_mutation: true, task_index: batch_task_index(task),
+        research_request_id: result.request_id, research_technology: result.technology,
+      } : undefined)
+      if (exact) settle_research_refusal(admission, receipt)
       log(`[AUTORIO] [ERROR] Research request ${result.request_id} rejected: ${result.technology}: ${result.code}; queued operations cancelled`)
       return
     }

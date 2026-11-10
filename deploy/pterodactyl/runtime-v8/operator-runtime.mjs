@@ -9,6 +9,7 @@ import { operationSignature } from './operation-reconciliation.mjs'
 import { PolicyError } from '../staging/structured-policy.mjs'
 import { parseExternalOperation as parseOperation } from './operator-native-bridge.mjs'
 import { libraryMetadata, readLibrary } from './method-library.mjs'
+import { ACTOR_SUPPLIES, actorSupplies } from './operator-actor-supplies.mjs'
 
 const MAX_RECORDS = 512
 const MAX_LEDGER_BYTES = 32 * 1024 * 1024
@@ -341,6 +342,8 @@ export async function openRuntime({ bridge, directory, session, pollMs = 500, ca
     }),
     observe: input => serialized(async () => {
       object(input, ['name', 'args'])
+      // Served from this session's own journal; no game call and no snapshot.
+      if (input.name === ACTOR_SUPPLIES) return actorSupplies(ledger.records, input.args ?? {})
       await snapshot()
       return bridge.observe(input.name, input.args ?? {})
     }),
