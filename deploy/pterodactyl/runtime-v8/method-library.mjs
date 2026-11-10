@@ -11,6 +11,8 @@ const MAX_LIBRARY_FILE_BYTES = 512 * 1024
 const MAX_QUERY = 160
 const MAX_LIMIT = 8
 const MAX_CATEGORIES = 16
+// A category lists whole by default; a pack may not declare a larger one.
+const MAX_CATEGORY_RECORDS = 16
 const idPattern = /^[a-z0-9][a-z0-9-]{0,99}$/
 const categoryPattern = /^[a-z][a-z0-9_-]{0,39}$/
 const fieldPattern = /^[a-z][a-z0-9_]{0,39}$/
@@ -48,7 +50,8 @@ function loadPack(bytes) {
   const recordIds = new Set()
   const categories = categoriesIn.map(category => {
     if (!categoryPattern.test(category?.id) || typeof category.name !== 'string' || typeof category.summary !== 'string'
-      || typeof category.ordered !== 'boolean' || !Array.isArray(category.records) || category.records.length === 0) fail('library_integrity_failed')
+      || typeof category.ordered !== 'boolean' || !Array.isArray(category.records) || category.records.length === 0
+      || category.records.length > MAX_CATEGORY_RECORDS) fail('library_integrity_failed')
     const records = category.records.map((record, index) => {
       const fields = Object.keys(record ?? {}).filter(key => !RECORD_KEYS.includes(key))
       if (!idPattern.test(record?.id) || ids.has(record.id) || recordIds.has(record.id)
@@ -58,7 +61,7 @@ function loadPack(bytes) {
         || fields.some(key => !fieldPattern.test(key) || VIEW_KEYS.includes(key) || !texts(record[key]))) fail('library_integrity_failed')
       recordIds.add(record.id)
       return { content_type: 'knowledge', category: category.id, id: record.id, name: record.name, summary: record.summary,
-        search_aliases: record.aliases ?? [], record, fields, order: index + 1 }
+        search_aliases: record.aliases ?? [], record, fields, ...(category.ordered ? { order: index + 1 } : {}) }
     })
     return { id: category.id, name: category.name, summary: category.summary, ordered: category.ordered, records }
   })
@@ -92,7 +95,7 @@ function related(entry, links) {
   return [...new Set([...own, ...links.get(entry.id)])]
 }
 function card(entry, links) {
-  return { kind: entry.content_type, ...(entry.category ? { category: entry.category, order: entry.order } : {}), id: entry.id, name: entry.name,
+  return { kind: entry.content_type, ...(entry.category ? { category: entry.category, ...(entry.order !== undefined ? { order: entry.order } : {}) } : {}), id: entry.id, name: entry.name,
     summary: entry.summary.slice(0, 400), ...(entry.summary.length > 400 ? { summary_truncated: true } : {}), ...(entry.level !== undefined ? { level: entry.level } : {}),
     related_ids: related(entry, links) }
 }
@@ -167,8 +170,8 @@ export function openLibrary({ file, source }) {
       result = { ...base, entry: entry.category ? recordView(entry, categories.find(category => category.id === entry.category), byId) : view(entry, links) }
     }
     else if (input.query === undefined) {
-      // Category listing in authored order.
-      const limit = input.limit ?? MAX_LIMIT
+      // Category listing in authored order: the whole category unless a limit is given.
+      const limit = input.limit ?? entries.length
       result = { ...base, category: input.category, total_matches: entries.length, truncated: entries.length > limit,
         results: entries.slice(0, limit).map(entry => card(entry, links)) }
     }

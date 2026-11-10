@@ -17,6 +17,7 @@ const sourceUrl = new URL(`../../${LIBRARY_SOURCE}`, import.meta.url)
 const pack = JSON.parse(await fs.readFile(sourceUrl))
 const everyEntry = [...pack.knowledge, ...pack.skills]
 const stageRecords = pack.knowledge_categories.find(category => category.id === 'stage').records
+const goalRecords = pack.knowledge_categories.find(category => category.id === 'user-goal').records
 
 test('library reads the leveled export: current schema, reported counts, unique valid ids, resolvable related ids', () => {
   assert.equal(pack.schema, LIBRARY_SCHEMA)
@@ -92,13 +93,16 @@ test('progression checkpoints knowledge is discoverable and linked from the rela
 test('stage category lists ordered game stages and each stage names existing methods', async () => {
   const listed = await readLibrary({ kind: 'knowledge', action: 'search', category: 'stage' })
   assert.deepEqual(listed.results.map(row => row.id), ['stage-manual-bootstrap', 'stage-burner-loops', 'stage-central-electricity',
-    'stage-electric-mining-transfers', 'stage-smelting-arrays', 'stage-sustained-consumption'])
-  assert.deepEqual(listed.results.map(row => row.order), [1, 2, 3, 4, 5, 6])
+    'stage-electric-mining-transfers', 'stage-smelting-arrays', 'stage-sustained-consumption', 'stage-fluid-processing',
+    'stage-advanced-production', 'stage-win-condition'])
+  // A category lists whole by default, within the result bound.
+  assert.equal(listed.truncated, false)
+  assert.deepEqual(listed.results.map(row => row.order), stageRecords.map((_, index) => index + 1))
   assert.ok(listed.results.every(row => row.category === 'stage' && row.kind === 'knowledge'))
   const ids = new Set(everyEntry.map(entry => entry.id))
   for (const stage of stageRecords) {
     assert.ok(stage.methods.every(id => ids.has(id)), stage.id)
-    assert.doesNotMatch(JSON.stringify({ ...stage, methods: undefined }), /\d|bper (?:second|minute|tick)b/i, stage.id)
+    assert.doesNotMatch(JSON.stringify({ ...stage, methods: undefined }), /\d|\bper (?:second|minute|tick)\b/i, stage.id)
     assert.ok(!ids.has(stage.id))
   }
   const burner = (await readLibrary({ kind: 'knowledge', action: 'get', id: 'stage-burner-loops' })).entry
@@ -117,6 +121,32 @@ test('stage category lists ordered game stages and each stage names existing met
     await assert.rejects(readLibrary(input), { code: 'invalid_library_arguments' })
   }
   await assert.rejects(readLibrary({ kind: 'knowledge', action: 'search', category: 'era' }), { code: 'library_category_not_found' })
+})
+
+// User goals are a knowledge sub-category: what a few-word goal means, its scale from live facts, and when it is done.
+test('goal category gives the meaning of common user goals with existing methods and no stored numbers', async () => {
+  const listed = await readLibrary({ kind: 'knowledge', action: 'search', category: 'user-goal' })
+  assert.deepEqual(listed.results.map(row => row.id), ['goal-starter-base', 'goal-automated-research', 'goal-finish-game'])
+  assert.ok(listed.results.every(row => row.category === 'user-goal' && row.order === undefined))
+  const ids = new Set(everyEntry.map(entry => entry.id))
+  for (const goal of goalRecords) {
+    for (const field of ['means', 'scale', 'done_when', 'not_counted']) assert.ok(goal[field].length > 0, `${goal.id} ${field}`)
+    assert.ok(goal.methods.includes('knowledge-automatic-supply'), goal.id)
+    assert.ok(goal.methods.every(id => ids.has(id)), goal.id)
+    assert.doesNotMatch(JSON.stringify({ ...goal, methods: undefined }), /\d|\bper (?:second|minute|tick)\b/i, goal.id)
+  }
+  const starter = (await readLibrary({ kind: 'knowledge', action: 'get', id: 'goal-starter-base' })).entry
+  assert.equal(starter.previous, undefined)
+  assert.match(starter.scale.join(' '), /live/)
+  assert.ok(starter.methods.some(row => row.id === 'skill-size-array-to-transport' && row.kind === 'skill'))
+  // Plain search reaches a goal from the user's own words.
+  for (const [query, id] of [['starter base', 'goal-starter-base'], ['finish the game', 'goal-finish-game'], ['launch a rocket', 'goal-finish-game'],
+    ['fully automated', 'knowledge-automatic-supply'], ['hand stocked', 'knowledge-automatic-supply']]) {
+    assert.ok((await readLibrary({ kind: 'knowledge', action: 'search', query })).results.some(row => row.id === id), query)
+  }
+  // What counts as automatic is library knowledge, and it points to the harness's own supply record.
+  const automatic = (await readLibrary({ kind: 'knowledge', action: 'get', id: 'knowledge-automatic-supply' })).entry
+  assert.match(automatic.applicability.live_checks.join(' '), /getActorSupplies/)
 })
 
 test('power/electricity search prioritizes power planning, not blanket owner aliases on burner methods', async () => {
@@ -199,12 +229,12 @@ const runtime=Object.fromEntries(['bindMachineDelivery','capabilities','context'
 test('library capability metadata stays small and advertises the local typed advisory boundary', () => {
   const m = libraryMetadata()
   assert.deepEqual(m.counts, { knowledge: pack.knowledge.length, skills: pack.skills.length })
-  assert.deepEqual(m.knowledge_categories.map(({ id, ordered, records }) => ({ id, ordered, records })), [{ id: 'stage', ordered: true, records: stageRecords.length }])
+  assert.deepEqual(m.knowledge_categories.map(({ id, ordered, records }) => ({ id, ordered, records })), [{ id: 'stage', ordered: true, records: stageRecords.length }, { id: 'user-goal', ordered: false, records: goalRecords.length }])
   assert.equal(m.source, LIBRARY_SOURCE)
   assert.equal(Object.hasOwn(m, 'donor_commit'), false)
   assert.equal(m.loading, 'on_demand')
   assert.equal(m.advisory_only, true)
-  assert.ok(JSON.stringify(m).length < 500)
+  assert.ok(JSON.stringify(m).length < 300 + 200 * m.knowledge_categories.length)
 })
 
 // The harness core is content-agnostic: prompt and tool text name no library id or category,
@@ -265,6 +295,7 @@ test('a second library with its own categories loads unchanged; malformed packs 
     withRecord({ entered_when: 'not a list' }),
     { ...other, knowledge_categories: [era, era] },
     { ...other, knowledge_categories: [{ ...other.knowledge_categories[1], id: 'Bad Id' }] },
+    { ...other, knowledge_categories: [{ ...era, records: Array.from({ length: 17 }, (_, index) => ({ ...era.records[0], id: `era-${index}` })) }] },
   ]
   for (const [index, value] of broken.entries()) {
     const bad = openLibrary({ file: await write(`broken-${index}.json`, value), source: 'test/broken.json' })

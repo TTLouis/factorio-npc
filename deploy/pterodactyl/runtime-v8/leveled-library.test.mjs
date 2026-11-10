@@ -27,7 +27,7 @@ test('all authored leveled methods survive the real model-context compactor with
 
 test('knowledge stays out of procedural cards and compaction, including invalid type results', () => {
   assert.equal(pack.schema, 3)
-  assert.equal(pack.knowledge.length, 9)
+  assert.equal(pack.knowledge.length, 10)
   for (const raw of pack.knowledge) {
     assert.equal(compactLoadedSkill(raw, raw.id), undefined)
     assert.deepEqual(parseSkillOffers(JSON.stringify({ ok: true, cards: [raw] })).cards, [])

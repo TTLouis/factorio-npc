@@ -4,6 +4,7 @@ import { nativeAdmissionJournal } from '../staging/native-admission-journal.mjs'
 import { executeAuthorizedBatch } from '../staging/supervisor-adapter.mjs'
 import { factorioName, luaString, PolicyError } from '../staging/structured-policy.mjs'
 import { machineDeliveryToolDefinition, validateMachineDeliveryBindingArgs } from './machine-delivery.mjs'
+import { ACTOR_SUPPLIES, ACTOR_SUPPLIES_NOTE, ACTOR_SUPPLIES_SCHEMA } from './operator-actor-supplies.mjs'
 import {
   batchWatermark,
   buildPendingOperation,
@@ -76,6 +77,8 @@ export const OBSERVATION_NAMES = Object.freeze([
   'getTaskStatus', 'getResearchRequest', 'findNearestEnemy', 'getDefenseStatus', 'getCombatStatus', 'getPumpSitePreparation', 'getWorldEntityFacts',
 ])
 export const observationDefinitions = toolDefinitions.filter(tool => OBSERVATION_NAMES.includes(tool.function.name))
+// External-only observations the runtime serves from its own journal, never from the game.
+export const JOURNAL_OBSERVATION_NAMES = Object.freeze([ACTOR_SUPPLIES])
 // Semantics the shared catalog leaves implicit and operators misread in the
 // 2026-11-01 trial. Facts about this bridge, not strategy advice.
 export const OPERATION_NOTES = Object.freeze({
@@ -107,10 +110,10 @@ export function capabilities() {
   return { operations: [...operationTypeCatalog().filter(operation => OPERATION_NAMES.includes(operation.name)), structuredClone(LINE_OPERATION), structuredClone(PICKUP_OPERATION)],
     goal_metadata_tools: [{ name: machineDeliveryToolDefinition.function.name, description: machineDeliveryToolDefinition.function.description,
       inputSchema: machineDeliveryToolDefinition.function.parameters, world_mutation: false, operation_authority: false }],
-    observations: [...OBSERVATION_NAMES], observation_schemas: observationDefinitions.map(tool => ({
+    observations: [...OBSERVATION_NAMES, ...JOURNAL_OBSERVATION_NAMES], observation_schemas: [...observationDefinitions.map(tool => ({
       name: tool.function.name, description: tool.function.description, inputSchema: tool.function.parameters,
-    })), limits: { wait_ticks: 3600, count: 100, transfer_count: 1000, walk_distance: 128, fluid_network_entities: 16, placement_prototypes: [...PLACEMENT_PROTOTYPES], fluid_candidate_prototypes: [...FLUID_PLACEMENT_PROTOTYPES], harvest_radius: 64, placement_requires_exact_grid: true, placement_clearing: false, line_domain: LINE_PLACEMENT_DOMAIN, line_count: MAX_LINE_PLACEMENTS, line_spacing: MAX_LINE_SPACING, pickup_radius: MAX_PICKUP_RADIUS, pickup_items: MAX_PICKUP_ITEMS, placement_domain: 'native-nonfluid-or-proven-fluid-candidate', recipe_domain: 'native-compatible-empty-isolated-assembling-machine' },
-    operation_notes: { ...OPERATION_NOTES }, observation_notes: { ...OBSERVATION_NOTES } }
+    })), structuredClone(ACTOR_SUPPLIES_SCHEMA)], limits: { wait_ticks: 3600, count: 100, transfer_count: 1000, walk_distance: 128, fluid_network_entities: 16, placement_prototypes: [...PLACEMENT_PROTOTYPES], fluid_candidate_prototypes: [...FLUID_PLACEMENT_PROTOTYPES], harvest_radius: 64, placement_requires_exact_grid: true, placement_clearing: false, line_domain: LINE_PLACEMENT_DOMAIN, line_count: MAX_LINE_PLACEMENTS, line_spacing: MAX_LINE_SPACING, pickup_radius: MAX_PICKUP_RADIUS, pickup_items: MAX_PICKUP_ITEMS, placement_domain: 'native-nonfluid-or-proven-fluid-candidate', recipe_domain: 'native-compatible-empty-isolated-assembling-machine' },
+    operation_notes: { ...OPERATION_NOTES }, observation_notes: { ...OBSERVATION_NOTES, [ACTOR_SUPPLIES]: ACTOR_SUPPLIES_NOTE } }
 }
 
 const MAX_REPLY_BYTES = 512 * 1024

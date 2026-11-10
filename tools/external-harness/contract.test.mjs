@@ -4,7 +4,7 @@ import test from 'node:test'
 
 import { libraryMetadata } from './library.mjs'
 import { MCP_PROTOCOL_VERSION, MCP_TOOLS } from './mcp-server.mjs'
-import { capabilities, LINE_PLACEMENT_DOMAIN, OBSERVATION_NAMES, OPERATION_NAMES } from './native-bridge.mjs'
+import { capabilities, JOURNAL_OBSERVATION_NAMES, LINE_PLACEMENT_DOMAIN, OBSERVATION_NAMES, OPERATION_NAMES } from './native-bridge.mjs'
 
 const manifest = JSON.parse(readFileSync(new URL('../../contracts/factorio-tool-contract.json', import.meta.url), 'utf8'))
 const external = manifest.external_harness
@@ -30,11 +30,20 @@ test('external subset and MCP lifecycle exactly match the canonical manifest', (
     else assert.ok(manifest.operations[name].surfaces.includes('pterodactyl-runtime-v8'), name)
   }
   for (const name of external.observations) assert.ok(manifest.tools[name].surfaces.includes('pterodactyl-runtime-v8'))
+  // Journal observations are external-only: listed beside the native ones, never a shared game tool.
+  assert.deepEqual(Object.keys(external.external_only_observations), [...JOURNAL_OBSERVATION_NAMES])
+  assert.deepEqual(capabilities().observations, [...OBSERVATION_NAMES, ...JOURNAL_OBSERVATION_NAMES])
+  for (const [name, entry] of Object.entries(external.external_only_observations)) {
+    assert.ok(!Object.hasOwn(manifest.tools, name), name)
+    assert.ok(!external.observations.includes(name), name)
+    assert.equal(entry.world_read, false, name)
+  }
 })
 
 test('external observations expose the authoritative argument schemas on demand', () => {
   const catalog = capabilities()
-  assert.deepEqual(catalog.observation_schemas.map(tool => tool.name).sort(), [...OBSERVATION_NAMES].sort())
+  assert.deepEqual(catalog.observation_schemas.map(tool => tool.name).sort(), [...OBSERVATION_NAMES, ...JOURNAL_OBSERVATION_NAMES].sort())
+  assert.deepEqual(Object.keys(catalog.observation_schemas.find(tool => tool.name === 'getActorSupplies').inputSchema.properties), external.external_only_observations.getActorSupplies.args)
   assert.ok(catalog.observation_schemas.find(tool => tool.name === 'getRecipeDetails').inputSchema.required.includes('item_or_recipe'))
   assert.ok(Object.hasOwn(catalog.observation_schemas.find(tool => tool.name === 'getEntityStatus').inputSchema.properties, 'unit_number'))
 })
@@ -56,7 +65,7 @@ test('external operation notes match the canonical manifest and name real operat
 test('external observation notes match the canonical manifest and name real observations', () => {
   const notes = capabilities().observation_notes
   assert.deepEqual(Object.keys(notes), external.observation_notes)
-  for (const name of Object.keys(notes)) assert.ok(external.observations.includes(name), name)
+  for (const name of Object.keys(notes)) assert.ok(external.observations.includes(name) || Object.hasOwn(external.external_only_observations, name), name)
 })
 
 

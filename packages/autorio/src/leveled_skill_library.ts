@@ -256,17 +256,29 @@ const ENTRIES: Entry[] = [
     failures: ['Historical stock or nominal capacity is presented as current measured production.'], related: ['skill-prove-sustainment'],
   },
   {
-    id: 'knowledge-automation-progression-checkpoints', name: 'Automation Progression Checkpoints', level: 0, type: 'knowledge',
+    id: 'knowledge-automation-progression-checkpoints', name: 'Automation Progression Checkpoints', level: 0, type: 'knowledge', revision: 2,
     tags: ['automation', 'progression', 'checkpoint', 'electricity', 'sustainment', 'fuel', 'smelting', 'mining'],
     aliases: ['electricity first', 'centralized power', 'electric mining drill', 'electrical miners', 'fuel runs', 'individual refueling', 'prefilled fuel', 'separated smelting arrays', 'sustainment', 'unattended production', 'automation stage', 'progression checkpoint'],
     summary: 'A checkpoint scale for classifying how automated a base is from observed facts and naming the next unmet checkpoint.',
     use: 'Judging how automated the current base is, choosing what to automate next, or deciding whether a short run shows sustained automation.', skip: 'The current stage and next checkpoint are already established by fresh observations of the same base.',
     checks: ['Power source, its fuel or supply route, and which machines draw electricity versus burner fuel.', 'Whether machine and fuel inventories were replenished with no agent actions over a fresh observation window.', 'Current capabilities and the admitted placement and tool support for the machines a checkpoint needs, such as electric miners.'],
-    steps: ['The checkpoints run in order from manual bootstrap through burner loops, centralized electricity, electric mining and transfers and separated smelting to sustained downstream consumption; each builds on the earlier ones.', 'Each checkpoint has its own stage record in the knowledge stage category, from stage-manual-bootstrap to stage-sustained-consumption, saying what the stage is, what evidence reaches it and which methods serve it.', 'Place the base at the highest checkpoint whose evidence holds over a fresh window and name the first checkpoint that lacks it.', 'Contrast: a burner design is a stage on the scale, not a substitute for a checkpoint that tool support does not yet reach.'],
+    steps: ['The checkpoints run in order from manual bootstrap through burner loops, centralized electricity, electric mining and transfers and separated smelting to sustained downstream consumption, then on to later stages that longer goals need; each builds on the earlier ones.', 'Each checkpoint has its own stage record in the knowledge stage category, listed in order, saying what the stage is, what evidence reaches it, what does not count yet and which methods serve it.', 'Place the base at the highest checkpoint whose evidence holds over a fresh window and name the first checkpoint that lacks it.', 'Contrast: a burner design is a stage on the scale, not a substitute for a checkpoint that tool support does not yet reach.'],
     done: 'The current stage is named with live evidence and the next unmet checkpoint is identified; unknown evidence leaves the checkpoint unmet.',
     failures: ['Prefilled stocks or a short positive run are classified as sustained.', 'Repeated individual refueling is counted as automation.', 'Unlocks or tool support are assumed from catalog presence.'],
     requires: ['Current capability evidence and admitted placement catalog for any machine type a checkpoint needs.'],
     related: ['knowledge-available-capabilities', 'knowledge-production-dependencies', 'knowledge-rates-stocks-freshness', 'burner-coal-loop', 'direct-miner-smelting', 'starter-mining-belt-output', 'burner-inserter-refueling', 'starter-smelting-row', 'steam-power-bootstrap', 'scale-out-production-line', 'skill-complete-operating-cell', 'skill-commission-before-copying', 'skill-minimum-useful-bootstrap', 'skill-parallel-production-scheduling', 'skill-manual-to-automatic-transition', 'skill-find-actual-bottleneck', 'skill-protect-critical-supply', 'skill-prove-sustainment', 'skill-define-production-interfaces', 'skill-local-or-shared-production', 'skill-maintain-remote-operations', 'skill-independent-operating-base'],
+  },
+  {
+    id: 'knowledge-automatic-supply', name: 'What Counts as Automatic', level: 0, type: 'knowledge',
+    tags: ['automation', 'fuel', 'bootstrap', 'supply', 'hand-feeding', 'sustainment'],
+    aliases: ['fully automated', 'automatic', 'self running', 'hands off', 'hand feeding', 'hand fed', 'fuel run', 'refuel by hand', 'priming', 'bootstrap', 'stocked chest', 'hand stocked', 'hand crafted packs', 'prefilled', 'manual supply', 'finite stock'],
+    summary: 'A goal that asks for automation means every machine in the finished base gets its fuel and inputs from the base itself, traced back to extraction, never from the agent. Manual priming is a finite, declared bootstrap only.',
+    use: 'Interpreting a goal that asks for an automated, self-running or hands-off base, or judging whether a finished line counts toward it.', skip: 'The user explicitly asks for a manual or hand-serviced result.',
+    checks: ['getActorSupplies lists every entity the agent moved items into during this session, with the items and when; a finished-chain machine that appears there after its declared bootstrap is still hand-served.', 'getEntityStatus and getLogisticsTopology for whether each input and fuel arrives by belt, inserter, pipe or the machine own mining.', 'A fresh observation window with no agent actions in which the inputs and fuel are replenished.'],
+    steps: ['Automatic means supplied by the base itself: fuel and inputs arrive by belt, inserter, pipe or the machine own mining, traced back to extraction. A machine that needs an agent fuel run or hand-delivered input is not automated, however long it runs afterwards.', 'A bootstrap only starts the system: a finite manual load into a temporary machine, such as one fuel load into a bootstrap furnace, and one priming of the first fuel drill. Declare it before doing it, do not repeat it and keep it out of the finished chains.', 'Hand-crafted or hand-inserted science packs count only as a declared bootstrap for an initial unlock the base cannot yet research itself. Research done with them does not count toward a goal that asks the base to research with its own science.', 'A hand-stocked chest, prefilled fuel or starter stock that runs down is finite supply, not automation, even when the machines it feeds are fully connected.', 'Contrast: a machine fed by belts or inserters from a chest the agent filled is connected, but it is not automated.'],
+    done: 'Every machine in the finished chains is absent from the actor supply record since its declared bootstrap, and its inputs and fuel replenish over a fresh window with no agent actions.',
+    failures: ['Repeated small fuel runs that keep a boiler or furnace going are counted as automation.', 'A lab fed from a hand-stocked chest is reported as research with the base own science.', 'The bootstrap machine stays in the finished design and keeps needing service.'],
+    related: ['knowledge-automation-progression-checkpoints', 'knowledge-rates-stocks-freshness', 'skill-manual-to-automatic-transition', 'skill-prove-sustainment', 'burner-coal-loop', 'burner-inserter-refueling'],
   },
   {
     id: 'knowledge-owner-expandable-base', name: 'Keep the Base Expandable', level: 2, type: 'knowledge',
@@ -777,7 +789,9 @@ export const LEVELED_KNOWLEDGE_DEFINITIONS = LEVELED_LIBRARY_DEFINITIONS.filter(
 // Game-stage records: the knowledge "stage" sub-category. Each is one checkpoint
 // of knowledge-automation-progression-checkpoints, in order, saying what the stage
 // is, what evidence shows it is reached, and which library methods serve it.
-// Methods only: no counts, rates or build orders. Exported beside the entries.
+// Stages after sustained consumption serve longer goals, up to the game's win
+// condition. Methods only: no counts, rates, unlock chains or build orders; the
+// live research path supplies those. Exported beside the entries.
 export interface ProgressionStage {
   id: string
   name: string
@@ -829,4 +843,69 @@ export const PROGRESSION_STAGES: ProgressionStage[] = [
     reached_when: ['Consumers keep working from automatic supply over a fresh window with no agent actions.'],
     not_yet: ['Hand-crafted or hand-delivered inputs.'],
     methods: ['knowledge-rates-stocks-freshness', 'knowledge-owner-tech-unlock-awareness', 'skill-size-research-to-supply', 'skill-define-production-interfaces', 'skill-manage-every-output', 'skill-find-actual-bottleneck', 'skill-prove-sustainment'] },
+  { id: 'stage-fluid-processing', name: 'Stage: Fluid Processing Chains',
+    summary: 'Production that runs on fluids, such as refining a pumped or extracted fluid into products that later science and intermediates need, with every output managed.',
+    aliases: ['fluid processing', 'oil', 'oil processing', 'refinery', 'chemical plant', 'pumpjack', 'fluids', 'plastic'],
+    reached_when: ['Extracted fluid is processed automatically into the products the next research needs, and no output backs up and stops the chain over a fresh window.'],
+    not_yet: ['A chain that stops when one of its outputs fills up, or that runs only from barrels or stock the agent delivered.'],
+    methods: ['knowledge-production-dependencies', 'knowledge-available-capabilities', 'skill-manage-every-output', 'skill-control-without-chatter', 'skill-preserve-working-stock', 'skill-define-production-interfaces', 'skill-find-actual-bottleneck'] },
+  { id: 'stage-advanced-production', name: 'Stage: Advanced Intermediates and Later Science',
+    summary: 'Later science packs and the intermediates they need, built from the earlier stages and grown deliberately where measured supply falls short.',
+    aliases: ['later science', 'advanced science', 'advanced intermediates', 'circuits', 'blue science', 'production science', 'utility science', 'scale up', 'expansion'],
+    reached_when: ['Every science pack the next research needs is made automatically and labs keep researching from that supply over a fresh window.'],
+    not_yet: ['Later packs made by hand or from stock the agent delivered.'],
+    methods: ['knowledge-owner-expandable-base', 'skill-local-or-shared-production', 'scale-out-production-line', 'skill-size-research-to-supply', 'skill-find-actual-bottleneck', 'skill-choose-next-investment', 'skill-upgrade-without-losing-service'] },
+  { id: 'stage-win-condition', name: 'Stage: Win Condition',
+    summary: 'The game reaches its own victory condition, for example a rocket launch, from a base that builds every required part automatically.',
+    aliases: ['finish the game', 'beat the game', 'win', 'victory', 'rocket', 'rocket launch', 'rocket silo', 'endgame', 'complete the game'],
+    reached_when: ['The live game reports its victory condition met, for example a launched rocket, and the parts it consumed were produced automatically.'],
+    not_yet: ['A win condition reached with hand-crafted or hand-delivered parts.'],
+    methods: ['knowledge-production-dependencies', 'skill-network-wide-progress', 'skill-choose-next-investment', 'skill-find-actual-bottleneck', 'skill-protect-critical-supply', 'skill-prove-sustainment'] },
+]
+
+// Goal records: the knowledge "goal" sub-category. A user names an outcome in a
+// few words; each record says what that outcome means, how to choose its scale
+// from live facts and when it is done. The meaning travels with the library, not
+// with the user's prompt. Methods only, no counts or rates.
+export interface GoalRecord {
+  id: string
+  name: string
+  summary: string
+  aliases: string[]
+  means: string[]
+  scale: string[]
+  done_when: string[]
+  not_counted: string[]
+  methods: string[]
+}
+// The pack declares this as a knowledge category; the harness loader knows no category by name.
+export const GOAL_CATEGORY = { id: 'user-goal', name: 'User goals',
+  summary: 'What common user goals mean: the result they ask for, how to choose its scale from live facts, when it is done and what does not count.',
+  ordered: false }
+
+export const GOAL_RECORDS: GoalRecord[] = [
+  { id: 'goal-starter-base', name: 'Goal: Starter Base',
+    summary: 'A first automated base: electric power, automatic smelting and science made and delivered to labs by the base itself, researching on its own and ready to expand.',
+    aliases: ['starter base', 'start base', 'first base', 'early base', 'electrified base', 'basic base', 'set up a base', 'base that researches', 'early game'],
+    means: ['The base reaches the stages in order through sustained downstream consumption: power, mining, smelting and early science all run automatically and labs research with the base own packs.', 'Automation follows knowledge-automatic-supply: the only manual supply is a finite, declared bootstrap.', 'The base stays expandable, following knowledge-owner-expandable-base, and uses purpose-built entities once research unlocks them.'],
+    scale: ['Unless the user names a size, choose the smallest scale that keeps every stage running together, then size each line from live rates: arrays to the transport that serves them, generation to the measured load and labs to the measured science supply.', 'Read current recipes, crafting times, transport capacity and research costs from live tools; do not reuse sizes from memory or an earlier world.'],
+    done_when: ['Every stage through sustained downstream consumption holds over a fresh window with no agent actions, and research keeps progressing from the base own science.', 'The research queue holds enough useful work that labs do not run out during that window.'],
+    not_counted: ['Science or plates from a hand-stocked chest, prefilled fuel or repeated fuel runs.', 'Research done with hand-crafted packs beyond a declared initial unlock.', 'A burner line kept where the goal needs electric mining.'],
+    methods: ['knowledge-automatic-supply', 'knowledge-automation-progression-checkpoints', 'knowledge-owner-expandable-base', 'knowledge-owner-tech-unlock-awareness', 'skill-size-array-to-transport', 'skill-grow-generation-with-load', 'skill-size-research-to-supply', 'skill-prove-sustainment'] },
+  { id: 'goal-automated-research', name: 'Goal: Automated Research',
+    summary: 'Research that keeps going on its own: the requested technologies, or the next useful ones, researched with science the base makes and delivers itself.',
+    aliases: ['automate research', 'research on its own', 'research automatically', 'self researching', 'science automation', 'keep researching', 'research technologies'],
+    means: ['Science packs are assembled and delivered to labs automatically, following knowledge-automatic-supply.', 'Named technologies are read live for their prerequisites, packs and unlocks; the path is the live research path, not a remembered order.'],
+    scale: ['Size science lines and labs together from the live unit cost and time of the target research and the measured pack supply.', 'Add a later science pack only when the live research path needs it.'],
+    done_when: ['The requested technologies are researched with the base own packs, or, without a list, research keeps progressing from automatic supply over a fresh window with useful work queued.'],
+    not_counted: ['Technologies researched with hand-crafted or hand-delivered packs beyond a declared initial unlock.'],
+    methods: ['knowledge-automatic-supply', 'knowledge-production-dependencies', 'knowledge-owner-tech-unlock-awareness', 'skill-size-research-to-supply', 'skill-trigger-aware-progression', 'skill-find-actual-bottleneck', 'skill-prove-sustainment'] },
+  { id: 'goal-finish-game', name: 'Goal: Finish the Game',
+    summary: 'Reach the game own victory condition, such as a rocket launch, by growing an automated base through every stage the live research path requires.',
+    aliases: ['finish the game', 'beat the game', 'win the game', 'complete the game', 'launch a rocket', 'rocket launch', 'endgame', 'play through'],
+    means: ['The live research path to the victory condition decides what the base must make; read it from the game rather than from memory.', 'Each stage builds on automated earlier stages, following knowledge-automatic-supply; the base grows in steps rather than being planned in one pass.', 'Keep a durable checkpoint of the current stage and next dependency, because this goal spans many sessions.'],
+    scale: ['Grow each line from measured shortfalls on the critical path to the next required research or part, not to a fixed size.', 'Keep earlier stages expandable so later stages can be added without rebuilding.'],
+    done_when: ['The live game reports its victory condition met, with the parts it consumed produced automatically.', 'Until then, progress is the highest stage that holds over a fresh window and the next unmet dependency on the live research path.'],
+    not_counted: ['Victory parts or packs made by hand or delivered from agent-filled stock.'],
+    methods: ['knowledge-automatic-supply', 'knowledge-automation-progression-checkpoints', 'knowledge-production-dependencies', 'knowledge-owner-expandable-base', 'skill-network-wide-progress', 'skill-choose-next-investment', 'skill-find-actual-bottleneck', 'skill-prove-sustainment'] },
 ]
