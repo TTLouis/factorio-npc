@@ -119,23 +119,41 @@ function view(entry, links) {
   return { ...common, goal_tags: entry.goal_tags, guidance: entry.guidance }
 }
 
+// A word of three letters or more; shorter words match almost any text.
+const SIGNIFICANT_TERM = 3
+
 function search(input, entries) {
   const query = normalize(input.query)
   const terms = query.split(' ')
-  const matches = entries.map(entry => {
+  const indexed = entries.map(entry => {
     const title = [entry.id, entry.name].map(normalize)
     const primary = [...title, ...(entry.search_aliases ?? []).map(normalize), ...(entry.goal_tags ?? []).map(normalize)]
     const secondary = [entry.summary].map(normalize)
     const detail = [...Object.values(entry.guidance ?? {}), ...(entry.fields ?? []).map(key => entry.record[key])]
       .flatMap(value => Array.isArray(value) ? value : [value]).filter(value => typeof value === 'string').map(normalize)
     const fields = [...primary, ...secondary, ...detail]
-    const text = fields.join(' ')
+    return { entry, title, primary, secondary, fields, text: fields.join(' ') }
+  })
+  const matches = indexed.map(({ entry, title, primary, secondary, fields, text }) => {
     const phrase = fields.some(field => field.includes(query))
     const score = (title.some(field => field.includes(query)) ? 60 : primary.some(field => field.includes(query)) ? 30 : secondary.some(field => field.includes(query)) ? 15 : phrase ? 5 : 0)
       + terms.filter(term => text.includes(term)).length
     return { entry, score: phrase || terms.every(term => text.includes(term)) ? score : 0 }
   }).filter(match => match.score > 0).sort((a, b) => b.score - a.score || a.entry.id.localeCompare(b.entry.id))
-  return matches.map(match => match.entry)
+  if (matches.length > 0) return { entries: matches.map(match => match.entry), partial: false }
+  // No entry holds every word, as when a user's own sentence is the query ("I want you to build me a starter base").
+  // Weigh each significant word by how rare it is among the searched entries, so request words that appear almost
+  // everywhere ("want", "build") count for little and the distinctive ones decide; a word in the title or aliases
+  // counts more than one in the text. Entries scoring at least half the best score are returned, marked partial.
+  const significant = [...new Set(terms.filter(term => term.length >= SIGNIFICANT_TERM))]
+  if (significant.length < 2) return { entries: [], partial: false }
+  const rarity = new Map(significant.map(term => [term, Math.log((indexed.length + 1) / (indexed.filter(row => row.text.includes(term)).length + 1))]))
+  const scored = indexed.map(({ entry, title, primary, text }) => ({ entry, score: significant.filter(term => text.includes(term))
+    .reduce((sum, term) => sum + rarity.get(term) * (title.some(field => field.includes(term)) ? 3 : primary.some(field => field.includes(term)) ? 2 : 1), 0) }))
+  const best = Math.max(0, ...scored.map(match => match.score))
+  const partial = best > 0 ? scored.filter(match => match.score >= best / 2)
+    .sort((a, b) => b.score - a.score || a.entry.id.localeCompare(b.entry.id)) : []
+  return { entries: partial.map(match => match.entry), partial: partial.length > 0 }
 }
 
 // Opens one library pack. `file` is a URL or path; `source` is the provenance label.
@@ -176,10 +194,10 @@ export function openLibrary({ file, source }) {
         results: entries.slice(0, limit).map(entry => card(entry, links)) }
     }
     else {
-      const matches = search(input, entries)
+      const { entries: matches, partial } = search(input, entries)
       const limit = input.limit ?? 5
       result = { ...base, query: input.query, ...(input.category ? { category: input.category } : {}), total_matches: matches.length, truncated: matches.length > limit,
-        results: matches.slice(0, limit).map(entry => card(entry, links)) }
+        ...(partial ? { partial_match: true } : {}), results: matches.slice(0, limit).map(entry => card(entry, links)) }
     }
     // Never silently trim full guidance or return a partial authority disclaimer.
     if (Buffer.byteLength(JSON.stringify(result)) > MAX_LIBRARY_RESULT_BYTES) fail('library_result_too_large')

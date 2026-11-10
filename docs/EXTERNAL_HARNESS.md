@@ -469,7 +469,11 @@ labelled `world_read: false`.
 
 `factorio_library` exposes separate `knowledge` references and `skill` methods.
 Use `action: "search"` with a nonempty `query` and optional `limit` (1–8), then
-`action: "get"` with the exact `id` for full guidance. A library may declare
+`action: "get"` with the exact `id` for full guidance. A search matches entries
+holding every word of the query. When none does, as with a user's own sentence,
+it ranks entries by the query's words of three letters or more, weighting each by
+how rare it is in the library, so common request words count for little. Those
+results are marked `partial_match: true`. A library may declare
 knowledge categories; `factorio_capabilities` lists them under
 `library.knowledge_categories` with their name, summary, record count and
 whether they are ordered. A search with `kind: "knowledge"` and a `category`
