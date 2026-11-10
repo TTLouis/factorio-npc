@@ -473,7 +473,8 @@ Use `action: "search"` with a nonempty `query` and optional `limit` (1–8), the
 holding every word of the query. When none does, as with a user's own sentence,
 it ranks entries by the query's words of three letters or more, weighting each by
 how rare it is in the library, so common request words count for little. Those
-results are marked `partial_match: true`. A library may declare
+results are marked `partial_match: true`. Only the operator's `factorio_library`
+calls fall back this way; the built-in planner's automatic searches stay strict. A library may declare
 knowledge categories; `factorio_capabilities` lists them under
 `library.knowledge_categories` with their name, summary, record count and
 whether they are ordered. A search with `kind: "knowledge"` and a `category`

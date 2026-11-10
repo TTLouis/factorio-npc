@@ -122,7 +122,7 @@ function view(entry, links) {
 // A word of three letters or more; shorter words match almost any text.
 const SIGNIFICANT_TERM = 3
 
-function search(input, entries) {
+function search(input, entries, partialMatch) {
   const query = normalize(input.query)
   const terms = query.split(' ')
   const indexed = entries.map(entry => {
@@ -140,11 +140,13 @@ function search(input, entries) {
       + terms.filter(term => text.includes(term)).length
     return { entry, score: phrase || terms.every(term => text.includes(term)) ? score : 0 }
   }).filter(match => match.score > 0).sort((a, b) => b.score - a.score || a.entry.id.localeCompare(b.entry.id))
-  if (matches.length > 0) return { entries: matches.map(match => match.entry), partial: false }
+  if (matches.length > 0 || !partialMatch) return { entries: matches.map(match => match.entry), partial: false }
   // No entry holds every word, as when a user's own sentence is the query ("I want you to build me a starter base").
   // Weigh each significant word by how rare it is among the searched entries, so request words that appear almost
   // everywhere ("want", "build") count for little and the distinctive ones decide; a word in the title or aliases
   // counts more than one in the text. Entries scoring at least half the best score are returned, marked partial.
+  // Only the external operator's own library calls ask for this; the internal planner's automatic searches (skill
+  // offers, knowledge retrieval) keep the strict match, so their prompts do not change.
   const significant = [...new Set(terms.filter(term => term.length >= SIGNIFICANT_TERM))]
   if (significant.length < 2) return { entries: [], partial: false }
   const rarity = new Map(significant.map(term => [term, Math.log((indexed.length + 1) / (indexed.filter(row => row.text.includes(term)).length + 1))]))
@@ -170,7 +172,7 @@ export function openLibrary({ file, source }) {
       loading: 'on_demand', result_bytes: MAX_LIBRARY_RESULT_BYTES }
   }
 
-  async function read(input) {
+  async function read(input, { partialMatch = false } = {}) {
     const current = load()
     validate(input, current)
     const { pack, links, categories, byId } = current
@@ -194,7 +196,7 @@ export function openLibrary({ file, source }) {
         results: entries.slice(0, limit).map(entry => card(entry, links)) }
     }
     else {
-      const { entries: matches, partial } = search(input, entries)
+      const { entries: matches, partial } = search(input, entries, partialMatch)
       const limit = input.limit ?? 5
       result = { ...base, query: input.query, ...(input.category ? { category: input.category } : {}), total_matches: matches.length, truncated: matches.length > limit,
         ...(partial ? { partial_match: true } : {}), results: matches.slice(0, limit).map(entry => card(entry, links)) }
@@ -216,4 +218,4 @@ function defaultFile() {
 let shipped
 const defaultLibrary = () => (shipped ??= openLibrary({ file: defaultFile(), source: LIBRARY_SOURCE }))
 export const libraryMetadata = () => defaultLibrary().metadata()
-export const readLibrary = input => defaultLibrary().read(input)
+export const readLibrary = (input, options) => defaultLibrary().read(input, options)

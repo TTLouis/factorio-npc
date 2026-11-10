@@ -239,24 +239,38 @@ test('library capability metadata stays small and advertises the local typed adv
 
 // A short user goal is often searched in the user's own words; one word the library never uses must not hide the goal.
 test('a search in the user words finds the goal as a marked partial match; exact searches are unchanged', async () => {
-  const sentence = await readLibrary({ kind: 'knowledge', action: 'search', query: 'build me a starter base' })
+  const operator = input => readLibrary(input, { partialMatch: true })
+  const sentence = await operator({ kind: 'knowledge', action: 'search', query: 'build me a starter base' })
   assert.equal(sentence.partial_match, true)
   assert.equal(sentence.results[0].id, 'goal-starter-base')
   // Request words common to most entries ("build", "want") do not outweigh the distinctive one (Sol round 1, SOL-001).
   for (const query of ['starter factory', 'build a starter factory', 'I want you to build me a starter base']) {
-    const found = await readLibrary({ kind: 'knowledge', action: 'search', query })
+    const found = await operator({ kind: 'knowledge', action: 'search', query })
     assert.deepEqual([found.partial_match, found.results[0]?.id], [true, 'goal-starter-base'], query)
   }
-  assert.equal((await readLibrary({ kind: 'knowledge', action: 'search', query: 'can you finish the game' })).results[0].id, 'goal-finish-game')
-  assert.ok((await readLibrary({ kind: 'knowledge', action: 'search', query: 'please finish the game for me' })).results.some(row => row.id === 'goal-finish-game'))
-  const exact = await readLibrary({ kind: 'knowledge', action: 'search', query: 'starter base' })
+  assert.equal((await operator({ kind: 'knowledge', action: 'search', query: 'can you finish the game' })).results[0].id, 'goal-finish-game')
+  assert.ok((await operator({ kind: 'knowledge', action: 'search', query: 'please finish the game for me' })).results.some(row => row.id === 'goal-finish-game'))
+  const exact = await operator({ kind: 'knowledge', action: 'search', query: 'starter base' })
   assert.equal(exact.partial_match, undefined)
   assert.deepEqual(exact.results.map(row => row.id), ['goal-starter-base'])
   // One significant word never falls back; nothing related is still nothing, without the partial mark.
   for (const query of ['xyzzy', 'xyzzy plugh', 'iron gear wheel']) {
-    const none = await readLibrary({ kind: 'knowledge', action: 'search', query })
+    const none = await operator({ kind: 'knowledge', action: 'search', query })
     assert.deepEqual([none.total_matches, none.partial_match], [0, undefined], query)
   }
+  // The internal planner's automatic searches keep the strict match (skill offers and replay prompts are unchanged).
+  assert.deepEqual((await readLibrary({ kind: 'knowledge', action: 'search', query: 'build me a starter base' })).total_matches, 0)
+})
+
+// The operator runtime's factorio_library calls are the ones that may fall back, still without a world call.
+test('the operator runtime library call returns the marked partial match', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'external-library-partial-'))
+  let runtime
+  t.after(async () => { try { await runtime?.close() } finally { await fs.rm(directory, { recursive: true, force: true }) } })
+  const bridge = new Proxy({}, { get: (_target, key) => () => { throw new Error(`Forbidden world call ${String(key)}`) } })
+  runtime = await openRuntime({ bridge, directory, session: 'library-partial-session' })
+  const found = await runtime.library({ kind: 'knowledge', action: 'search', query: 'build me a starter base' })
+  assert.deepEqual([found.partial_match, found.results[0]?.id], [true, 'goal-starter-base'])
 })
 
 // The harness core is content-agnostic: prompt and tool text name no library id or category,

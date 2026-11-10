@@ -323,7 +323,8 @@ export async function openRuntime({ bridge, directory, session, pollMs = 500, ca
       object(input, ['unit_number'])
       return bridge.bindMachineDelivery(input)
     }),
-    library: readLibrary,
+    // The operator searches in the user's own words, so its calls may fall back to a marked partial match.
+    library: input => readLibrary(input, { partialMatch: true }),
     context: () => serialized(async () => {
       for (const row of ledger.records.filter(row => !row.terminal)) await refresh(row)
       if (ledger.records.at(-1)?.terminal) await refresh(ledger.records.at(-1))
