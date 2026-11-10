@@ -2,6 +2,7 @@ import type { LuaEntity } from 'factorio:runtime'
 import type { ControlledActor } from './actors/types'
 import { resolve_exact_entity } from './entity_reference'
 import { build_interaction_reach, entity_interaction_reach } from './interaction_range'
+import { line_node_actor_in_footprint, line_node_axis } from './line_placement'
 import { placement_check_args } from './placement_geometry'
 import type { new_task_manager } from './task_manager'
 import type {
@@ -101,13 +102,20 @@ function placement_clearance(entity_name: string) {
   return radius + PLACEMENT_ESCAPE_MARGIN
 }
 
-function placement_escape_position(actor: ControlledActor, target: Position, clearance: number) {
+// `along` names the axis of a placement line: its perpendicular sides come first, so the actor does not step onto a later
+// tile of the same line.
+function placement_escape_position(actor: ControlledActor, target: Position, clearance: number, along?: 'x' | 'y') {
   const character_name = actor.character?.name ?? 'character'
   const distance = clearance + PLACEMENT_ESCAPE_MARGIN
-  const offsets = [
-    { x: 1, y: 0 }, { x: -1, y: 0 }, { x: 0, y: 1 }, { x: 0, y: -1 },
-    { x: 1, y: 1 }, { x: 1, y: -1 }, { x: -1, y: 1 }, { x: -1, y: -1 },
-  ]
+  const offsets = along === 'x'
+    ? [
+        { x: 0, y: 1 }, { x: 0, y: -1 }, { x: 1, y: 0 }, { x: -1, y: 0 },
+        { x: 1, y: 1 }, { x: 1, y: -1 }, { x: -1, y: 1 }, { x: -1, y: -1 },
+      ]
+    : [
+        { x: 1, y: 0 }, { x: -1, y: 0 }, { x: 0, y: 1 }, { x: 0, y: -1 },
+        { x: 1, y: 1 }, { x: 1, y: -1 }, { x: -1, y: 1 }, { x: -1, y: -1 },
+      ]
   for (const offset of offsets) {
     const desired = { x: target.x + offset.x * distance, y: target.y + offset.y * distance }
     const safe = actor.surface.find_non_colliding_position(character_name, desired, 1.5, 0.5, true)
@@ -143,7 +151,10 @@ export function new_interaction_recovery(manager: Manager) {
         )
       }
 
-      if (actor.surface.can_place_entity({
+      // The native check accepts a belt under a character, but a line tile is refused while any character (the actor
+      // included) stands in it, so the actor steps out of its own line tile even when can_place_entity passes.
+      const in_line_tile = line_node_actor_in_footprint(actor, task.line_node, task.entity_name, task.position, task.direction)
+      if (!in_line_tile && actor.surface.can_place_entity({
         name: task.entity_name,
         position: task.position,
         direction: task.direction,
@@ -152,8 +163,8 @@ export function new_interaction_recovery(manager: Manager) {
       })) return false
 
       const clearance = placement_clearance(task.entity_name)
-      if (distance_to_placement > clearance ** 2 || clearance >= reach) return false
-      const escape = placement_escape_position(actor, task.position, clearance)
+      if ((!in_line_tile && distance_to_placement > clearance ** 2) || clearance >= reach) return false
+      const escape = placement_escape_position(actor, task.position, clearance, line_node_axis(task.line_node))
       if (!escape) return false
       return interrupt(
         manager,

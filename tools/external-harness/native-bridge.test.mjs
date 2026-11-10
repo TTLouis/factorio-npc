@@ -144,6 +144,28 @@ test('native atomic precondition refusal proves no admission; generic error does
   await assert.rejects(f.bridge.submit(prepared), error => error.notAdmitted !== true)
 })
 
+// Trial 4r r4-063: the atomic re-run of the preflight refused, and the receipt had no cause.
+test('an admission-time preflight refusal carries its native code, tile and blockers', async () => {
+  const f = fixture(); const prepared = await f.bridge.prepare(operation, 'run/op_1')
+  let gate
+  const refuse = text => command => { gate = command; return `${command.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)[0]}${JSON.stringify({ ok: false, result: text, prefix: {} })}` }
+  f.onSubmit = refuse('external_guard_refused:preflight_rejected:placement_footprint_occupied@0;character:character::33.50:16.50;item-entity:item-on-ground:coal:-3.25:4.00')
+  await assert.rejects(f.bridge.submit(prepared), error => {
+    assert.equal(error.notAdmitted, true); assert.equal(error.code, 'preflight_rejected')
+    assert.deepEqual(error.details, { native_code: 'placement_footprint_occupied', tile_index: 0, blockers: [
+      { name: 'character', type: 'character', position: { x: 33.5, y: 16.5 } },
+      { name: 'item-on-ground', type: 'item-entity', position: { x: -3.25, y: 4 }, item: 'coal' }] })
+    return true
+  })
+  // The gate renders the refused preflight's cause into its refusal text.
+  assert.match(gate, /if p\.ok~=true then return "preflight_rejected"\.\.\(function\(p\)/)
+  // A detail suffix on another guard code, or a malformed one, proves nothing.
+  f.onSubmit = refuse('external_guard_refused:native_busy:placement_footprint_occupied')
+  await assert.rejects(f.bridge.submit(prepared), error => error.notAdmitted !== true)
+  f.onSubmit = refuse('external_guard_refused:preflight_rejected:Bad Code')
+  await assert.rejects(f.bridge.submit(prepared), error => error.notAdmitted !== true)
+})
+
 test('tampered prepared operation cannot use the original durable signature', async () => {
   const f = fixture(); const prepared = await f.bridge.prepare(operation, 'run/op_1')
   prepared.operation.args.count = 2
@@ -162,6 +184,32 @@ test('exact admission completion is execution evidence, never goal success', asy
   assert.equal(result.goal_verified, false)
   assert.equal(result.evidence.receipts.length, 1)
   assert.equal(result.evidence.basic_operation, undefined)
+})
+
+// Trial 6: receipts never carried the placed unit number because the bridge read a field the status snapshot does not have.
+test('a receipt names the entity its own placement created, and only its own', async () => {
+  const f = fixture(); const prepared = await f.bridge.prepare(operation, 'run/op_1')
+  f.state.status.admission_journal = [row(prepared.pending, 'completed')]
+  f.state.status.receipt_journal = [{ batch_id: 1, batch_generation: 2, batch_ref: 'batch-g2-1', state: 'completed', task_count: 1, task_types: ['placing'], tick: 180 }]
+  f.state.journal.high_water = 5
+  const placedResult = { accepted: true, completed: true, code: 'completed', entity_name: 'stone-furnace', placed_unit_number: 412, placed_entity_type: 'furnace',
+    placed_position: { x: 3, y: -2 }, placed_direction: 0, placed_batch_id: 1, placed_batch_generation: 2, placed_batch_ref: 'batch-g2-1' }
+  f.state.status.basic_operation = { last_result: placedResult, next_operation_id: 9 }
+  const result = await f.bridge.receipt(prepared.pending)
+  assert.deepEqual(result.placed_entity, { unit_number: 412, entity_name: 'stone-furnace', entity_type: 'furnace', position: { x: 3, y: -2 }, direction: 0, source: 'native_placement_result' })
+  assert.equal(result.evidence.basic_operation.placed_unit_number, 412)
+  assert.equal(result.goal_verified, false)
+  // Another batch's result (same ref text, other generation), or one overwritten by a later operation, is not this receipt's.
+  for (const other of [{ ...placedResult, placed_batch_generation: 3 }, { ...placedResult, placed_batch_ref: 'batch-g2-2' }, { accepted: true, completed: true, code: 'completed' }]) {
+    f.state.status.basic_operation = { last_result: other, next_operation_id: 10 }
+    const unrelated = await f.bridge.receipt(prepared.pending)
+    assert.equal(unrelated.placed_entity, undefined)
+    assert.equal(unrelated.evidence.basic_operation, undefined)
+    assert.equal(unrelated.state, 'completed')
+  }
+  // Sol review: a modded name is reported as the game names it, not as unknown.
+  f.state.status.basic_operation = { last_result: { ...placedResult, entity_name: 'MyMod-Furnace' }, next_operation_id: 11 }
+  assert.equal((await f.bridge.receipt(prepared.pending)).placed_entity.entity_name, 'MyMod-Furnace')
 })
 
 test('same key with wrong signature is uncertain, unrelated receipts do not count', async () => {
@@ -235,6 +283,11 @@ test('automatic production support keeps canonical recipe admission and bounded 
   await f.bridge.observe('getResourceAmounts', { resource_name: 'iron-ore', center: { x: 4, y: -3 }, radius: 2 })
   assert.match(f.calls.at(-1), /remote\.call\("autorio_tools","get_resource_amounts",\{resource_name='iron-ore',center=\{x=4,y=-3\},radius=2\}\)/)
   await assert.rejects(f.bridge.observe('getResourceAmounts', { radius: 49 }), { code: 'invalid_observation_arguments' })
+  // Trial 4r: an area with no ore came back with tiles {} (an empty Lua table); list fields are lists.
+  f.onCommand = command => command.includes('get_resource_amounts') ? JSON.stringify({ ok: true, resources: {}, tiles: {}, tiles_truncated: false, unseen_chunks: {}, area: {} }) : undefined
+  const empty = await f.bridge.observe('getResourceAmounts', { resource_name: 'iron-ore', radius: 2 })
+  assert.deepEqual([empty.resources, empty.tiles, empty.unseen_chunks], [[], [], []])
+  assert.deepEqual(empty.area, {})
 })
 
 test('native rejection of an empty connected fluid assembler cannot queue a recipe task', async () => {
@@ -511,24 +564,39 @@ test('placement candidates are annotated with the same footprint rule external p
     { id: 'candidate-1', position: { x: 4.5, y: 0.5 }, footprint: { world_box: box(4.5, 0.5) } },
     { id: 'candidate-2', position: { x: 6.5, y: 0.5 }, footprint: { world_box: box(6.5, 0.5) } }] }
   f.onCommand = command => command.includes('rows=out')
-    ? JSON.stringify({ ok: true, tick: 5361, rows: [{ code: 'placement_footprint_occupied', blockers: [{ name: 'item-on-ground', type: 'item-entity', position: { x: 4.5, y: 0.5 }, item: 'iron-plate' }] }, { code: 'clear', blockers: {} }] })
+    ? JSON.stringify({ ok: true, tick: 5361, rows: [{ code: 'placement_footprint_occupied', blockers: [{ name: 'item-on-ground', type: 'item-entity', position: { x: 4.5, y: 0.5 }, item: 'iron-plate' }], resources: {} }, { code: 'clear', blockers: {}, resources: [{ name: 'iron-ore', tiles: 1 }, { name: 'bad name!', tiles: 2 }, { name: 'stone', tiles: 0 }] }] })
     : command.includes('get_placement_candidates') ? JSON.stringify(native) : undefined
   const result = await f.bridge.observe('getPlacementCandidates', { entity_name: 'transport-belt', covers_position: { x: 4.5, y: 0.5 } })
   assert.equal(result.legal_candidate_count, 2, 'native fields are preserved')
   assert.deepEqual(result.candidates[0].external_footprint, { eligible: false, code: 'placement_footprint_occupied',
     blockers: [{ name: 'item-on-ground', type: 'item-entity', position: { x: 4.5, y: 0.5 }, item: 'iron-plate' }] })
   assert.deepEqual(result.candidates[1].external_footprint, { eligible: true })
+  // Trial 4r: buildings landed on the ore patch. The resource tiles under each footprint are a fact on the candidate.
+  assert.equal(result.candidates[0].covers_resources, undefined, 'no resource tiles, no field')
+  assert.deepEqual(result.candidates[1].covers_resources, [{ name: 'iron-ore', tiles: 1 }, { name: 'unknown', tiles: 2 }])
+  assert.match(result.external_placement.rule, /covers_resources lists the resource tiles/)
+  assert.ok(f.calls.at(-1).includes('find_entities_filtered{area=box,type="resource",limit=256}'))
   assert.equal(result.external_placement.checked, true)
   assert.equal(result.external_placement.blocked_candidate_count, 1)
   assert.equal(result.external_placement.eligible_candidate_count, 1)
   const annotation = f.calls.at(-1)
   assert.ok(annotation.includes('{{4.25,0.25},{4.75,0.75}}'))
   // The candidate check and placement preflight must send one identical rule.
-  const rule = command => command.match(/local function external_footprint\(surface,box\).*?return nil,blockers end;/)?.[0]
+  const rule = command => command.match(/local function external_footprint\(surface,box,own,placed\).*?return nil,blockers end;/)?.[0]
   f.state.status.placement_no_clear_supported = true; f.onCommand = undefined
   await f.bridge.prepare({ name: 'place_entity', args: { entity_name: 'transport-belt', x: 6.5, y: 0.5 } }, 'run/rule')
   assert.ok(rule(annotation))
   assert.equal(rule(f.calls[1]), rule(annotation))
+  // The NPC's hidden vision vehicle follows the actor and has no collision; the mod's own scans skip it, and so does this rule
+  // (native line lane: a line under the actor was refused for "sgluna-npc-vision [car]").
+  assert.ok(rule(annotation).includes('e.name~="sgluna-npc-vision"'))
+  // Trial 5: native placement collides only where collision layers overlap, so a tree stump (doodad layer) does not block a
+  // belt. Items on the ground and characters always block; an unknown placed prototype or unreadable mask blocks too.
+  assert.ok(rule(annotation).includes('if e.type=="item-entity" or e.type=="character" or not mask then return true end'))
+  assert.ok(rule(annotation).includes('if on and mask[k] then return true end'))
+  assert.ok(annotation.includes(`external_footprint(surface,box,nil,'transport-belt')`), 'the annotation checks against the candidate prototype')
+  assert.ok(f.calls.find(text => text.includes('exact_grid_required')).includes(`external_footprint(surface,f.world_box,nil,'transport-belt')`), 'place_entity checks against its own prototype')
+  assert.ok(f.calls.find(text => text.includes('exact_grid_required')).includes(`code="placement_not_clear",blockers=not_clear_blockers(surface,f.world_box,'transport-belt'),planned_footprint=f`), 'a can_place refusal names what collides')
 })
 
 test('candidate annotation fails visibly, never by dropping or inventing eligibility', async () => {
@@ -560,8 +628,8 @@ test('candidate annotation survives a transport failure and place_candidate shar
   f.preflight = { ok: false, code: 'placement_footprint_occupied' }
   await assert.rejects(f.bridge.prepare({ name: 'place_candidate', args: { candidate_set_id: 'placement-1', candidate_id: 'candidate-1' } }, 'run/fluid'))
   const preflight = f.calls.find(command => command.includes('external_candidate_unproven'))
-  assert.match(preflight, /local function external_footprint\(surface,box\)/)
-  assert.match(preflight, /local code,blockers=external_footprint\(surface,f\.world_box\)/)
+  assert.match(preflight, /local function external_footprint\(surface,box,own,placed\)/)
+  assert.match(preflight, /local code,blockers=external_footprint\(surface,f\.world_box,nil,n\)/)
 })
 
 // 2026-11-03 trial finding 1 (test-results/external-sonnet-redscience-20261103):
@@ -818,4 +886,182 @@ test('machine delivery cannot bind without owned current world scope or a passin
   f.onCommand = command => command.includes('"bind_current_machine_delivery"') ? '{"ok":false,"error":"machine_delivery_scope_changed"}' : undefined
   await assert.rejects(f.bridge.bindMachineDelivery({ unit_number: 42 }), { code: 'machine_delivery_scope_changed' })
   assert.equal(f.calls.filter(command => command.includes('"bind_current_machine_delivery"')).length, 1)
+})
+
+const line = { name: 'place_line', args: { entity_name: 'transport-belt', x: 2.5, y: -3.5, direction: 4, line_direction: 4, count: 3 } }
+function lineFixture() {
+  const f = fixture()
+  Object.assign(f.state.status, { placement_no_clear_supported: true, external_line_placement_supported: 1 })
+  return f
+}
+
+test('place_line parses exact bounded arguments, fills defaults and renders one native remote call', () => {
+  assert.deepEqual(parseExternalOperation(line).args, { ...line.args, spacing: 1 })
+  assert.deepEqual(parseExternalOperation({ name: 'place_line', args: { entity_name: 'small-electric-pole', x: 0.5, y: 0.5, line_direction: 8, count: 4, spacing: 5 } }).args,
+    { entity_name: 'small-electric-pole', x: 0.5, y: 0.5, direction: 0, line_direction: 8, count: 4, spacing: 5 })
+  assert.equal(renderExternalOperation(line), `remote.call("autorio_operations","place_line",'transport-belt',2.5,-3.5,4,4,3,1)`)
+  for (const args of [
+    { ...line.args, entity_name: '' }, { ...line.args, entity_name: 7 }, { ...line.args, count: 0 }, { ...line.args, count: 33 }, { ...line.args, spacing: 9 },
+    { ...line.args, line_direction: 2 }, { ...line.args, direction: 6 }, { ...line.args, x: Number.NaN }, { ...line.args, refuse_clearance: false },
+    { ...line.args, lua: 'game.print(1)' }, { ...line.args, count: 2.5 },
+  ]) assert.throws(() => parseExternalOperation({ name: 'place_line', args }), JSON.stringify(args))
+  const catalog = capabilities()
+  assert.equal(catalog.limits.line_domain, 'native-nonfluid-non-overlapping')
+  for (const name of ['stone-furnace', 'MyMod-Furnace']) assert.equal(parseExternalOperation({ name: 'place_line', args: { ...line.args, entity_name: name, spacing: 2 } }).args.entity_name, name)
+  assert.equal(catalog.limits.line_count, 32)
+  assert.equal(catalog.limits.line_spacing, 8)
+  assert.ok(catalog.operations.find(item => item.name === 'place_line').external_only)
+})
+
+test('place_line needs both safety capabilities and every tile within walk range before any game call', async () => {
+  const f = fixture()
+  await assert.rejects(f.bridge.prepare(line, 'run/line'), error => error.code === 'line_placement_capability_missing' && error.notSent)
+  f.state.status.placement_no_clear_supported = true
+  await assert.rejects(f.bridge.prepare(line, 'run/line'), { code: 'line_placement_capability_missing' })
+  f.state.status.external_line_placement_supported = 1
+  f.state.status.actor.position = { x: -100, y: -3.5 }
+  const far = { name: 'place_line', args: { ...line.args, x: 20.5, count: 10, spacing: 1 } }
+  await assert.rejects(f.bridge.prepare(far, 'run/line'), error => error.code === 'operation_limit' && error.details.tile_index === 8 && error.notSent)
+  assert.ok(!f.calls.some(command => command.includes('autorio_preflight')))
+})
+
+test('place_line preflight checks every tile with the external footprint rule and names the refused tile', async () => {
+  const f = lineFixture()
+  f.preflight = { ok: false, code: 'placement_footprint_occupied', tile_index: 1, blockers: [{ name: 'item-on-ground', type: 'item-entity', position: { x: 3.5, y: -3.5 }, item: 'iron-plate' }] }
+  await assert.rejects(f.bridge.prepare(line, 'run/line'), error => error.notSent && error.details.native_code === 'placement_footprint_occupied'
+    && error.details.tile_index === 1 && error.details.blockers[0].item === 'iron-plate' && /Line tile 1 refused/.test(error.publicMessage))
+  const command = f.calls.find(text => text.includes('autorio_preflight'))
+  for (const fragment of ['"place_line"', 'limit=129', 'tile_index=i-1', 'preservation_nonfluid_output']) assert.ok(command.includes(fragment), fragment)
+  // Trial 4r: only the line's re-check exempts the actor's own character (the runtime steps out of each tile before placing).
+  assert.ok(command.includes('local own=remote.call("sgluna_deployment","status").actor_id') && command.includes(`external_footprint(surface,t.world_box,own,'transport-belt')`))
+  assert.ok(command.includes('not (own and e.type=="character" and e.unit_number==own)'))
+  f.preflight = { ok: false, code: 'line_placement_items_insufficient', placement_item: { item_name: 'transport-belt', count: 3, held_count: 1, required_count: 3 } }
+  await assert.rejects(f.bridge.prepare(line, 'run/line'), error => error.details.native_code === 'line_placement_items_insufficient'
+    && error.details.placement_item.held_count === 1 && /Requires 3 transport-belt, holds 1/.test(error.publicMessage))
+})
+
+test('place_line submit rechecks the line capability atomically and proves a guard refusal not admitted', async () => {
+  const f = lineFixture()
+  const prepared = await f.bridge.prepare(line, 'run/line')
+  f.onSubmit = command => {
+    assert.ok(command.includes('s.external_line_placement_supported~=1 then return "line_placement_capability_missing"'))
+    assert.ok(command.includes('for _,t in ipairs({{2.5,-3.5},{3.5,-3.5},{4.5,-3.5}}) do if (p.x-(t[1]))^2+(p.y-(t[2]))^2>16384 then return "walk_out_of_range"'), 'every tile is rechecked against the live actor position')
+    assert.ok(command.includes(`remote.call("autorio_operations","place_line",'transport-belt',2.5,-3.5,4,4,3,1)`))
+    return `${command.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)[0]}${JSON.stringify({ ok: false, result: 'external_guard_refused:line_placement_capability_missing', prefix: {} })}`
+  }
+  await assert.rejects(f.bridge.submit(prepared), error => error.notAdmitted && error.code === 'line_placement_capability_missing')
+})
+
+function lineRecord(pending, placed, extra = {}) {
+  return { ok: true, line: { line_id: 4, actor_id: 7, entity_name: 'transport-belt', count: 3, origin: { x: 2.5, y: -3.5 }, direction: 4, line_direction: 4, spacing: 1,
+    batch_id: 1, batch_generation: 2, batch_ref: 'batch-g2-1',
+    placed: placed.map(index => ({ index, unit_number: 50 + index, name: 'transport-belt', position: { x: 2.5 + index, y: -3.5 }, direction: 4, tick: 120 + index })), ...extra } }
+}
+
+test('a completed line receipt lists each placed entity; a short native line record is never completion', async () => {
+  const f = lineFixture()
+  const prepared = await f.bridge.prepare(line, 'run/line')
+  const admission = row(prepared.pending, 'completed'); admission.slots[0].queued_tasks = 3
+  f.state.status.admission_journal = [admission]
+  f.state.status.receipt_journal = [{ batch_id: 1, batch_generation: 2, batch_ref: 'batch-g2-1', state: 'completed', task_count: 3, task_types: ['placing', 'placing', 'placing'], tick: 180 }]
+  f.state.journal.high_water = 5
+  let record = lineRecord(prepared.pending, [0, 1, 2])
+  f.onCommand = command => command.includes("\"line_placement_status\",'batch-g2-1'") ? JSON.stringify(record) : undefined
+  const done = await f.bridge.receipt(prepared.pending)
+  assert.equal(done.state, 'completed')
+  assert.equal(done.goal_verified, false)
+  assert.deepEqual(done.line_placement.placed.map(entity => [entity.index, entity.unit_number, entity.position.x]), [[0, 50, 2.5], [1, 51, 3.5], [2, 52, 4.5]])
+  assert.equal(done.line_placement.placed_count, 3)
+  assert.equal(done.line_placement.refusal, null)
+  record = lineRecord(prepared.pending, [0, 1])
+  const short = await f.bridge.receipt(prepared.pending)
+  assert.equal(short.state, 'uncertain')
+  assert.equal(short.reason, 'line_receipt_incomplete')
+  assert.equal(short.requires_reconciliation, true)
+  record = { ...lineRecord(prepared.pending, [0, 1, 2]), line: { ...lineRecord(prepared.pending, [0, 1, 2]).line, batch_ref: 'batch-g2-9' } }
+  const foreign = await f.bridge.receipt(prepared.pending)
+  assert.equal(foreign.state, 'uncertain', 'a line record of another batch is not this receipt')
+  assert.equal(foreign.line_placement, null)
+  record = { ...lineRecord(prepared.pending, [0, 1, 2]), line: { ...lineRecord(prepared.pending, [0, 1, 2]).line, spacing: 2 } }
+  const other = await f.bridge.receipt(prepared.pending)
+  assert.equal(other.state, 'uncertain', 'a record whose arguments do not reproduce the request identity is not this line')
+  assert.equal(other.line_placement, null)
+})
+
+// Trial 4r: ore a drill dropped on the ground blocked belt tiles, and nothing could pick it up. Placement still never clears;
+// pick_up_ground_items is the separate, bounded operation for items on the ground.
+const pickup = { name: 'pick_up_ground_items', args: { x: 3.4, y: -2.7, radius: 1 } }
+function pickupFixture() {
+  const f = fixture()
+  f.state.status.external_ground_pickup_supported = 1
+  f.preflight = { ok: true, operation: 'pick_up_ground_items', items: [
+    { name: 'iron-ore', count: 3, position: { x: 3.3, y: -2.6 } }, { name: 'stone', count: 1, position: { x: 4.1, y: -2.2 } },
+    { name: 'iron-ore', count: 2, position: { x: 2.9, y: -3.1 } }] }
+  return f
+}
+
+test('pick_up_ground_items parses bounded arguments, fills the radius and renders one native remote call', () => {
+  assert.deepEqual(parseExternalOperation(pickup).args, pickup.args)
+  assert.deepEqual(parseExternalOperation({ name: 'pick_up_ground_items', args: { x: -1, y: 2 } }).args, { x: -1, y: 2, radius: 0 })
+  assert.equal(renderExternalOperation(pickup), 'remote.call("autorio_operations","pick_up_ground_items",3.4,-2.7,1)')
+  for (const args of [
+    { ...pickup.args, radius: 3 }, { ...pickup.args, radius: -1 }, { ...pickup.args, radius: 1.5 }, { ...pickup.args, x: Number.NaN },
+    { y: 0, radius: 0 }, { ...pickup.args, entity_name: 'tree' }, { ...pickup.args, lua: 'game.print(1)' }, { ...pickup.args, x: 2000000 },
+  ]) assert.throws(() => parseExternalOperation({ name: 'pick_up_ground_items', args }), JSON.stringify(args))
+  const catalog = capabilities()
+  assert.ok(OPERATION_NAMES.includes('pick_up_ground_items'))
+  assert.ok(catalog.operations.find(item => item.name === 'pick_up_ground_items').external_only)
+  assert.equal(catalog.limits.pickup_radius, 2)
+  assert.match(catalog.operation_notes.pick_up_ground_items, /Nothing else in the box is mined/)
+  assert.match(catalog.operation_notes.place_entity, /picked up with pick_up_ground_items/)
+})
+
+test('pick_up_ground_items needs the native capability and a box within walk range before any game call', async () => {
+  const f = fixture()
+  await assert.rejects(f.bridge.prepare(pickup, 'run/pickup'), error => error.code === 'ground_pickup_capability_missing' && error.notSent)
+  f.state.status.external_ground_pickup_supported = 1
+  f.state.status.actor.position = { x: 200, y: 0 }
+  await assert.rejects(f.bridge.prepare(pickup, 'run/pickup'), error => error.code === 'operation_limit' && error.details.maximum === 128 && error.notSent)
+  assert.ok(!f.calls.some(command => command.includes('autorio_preflight')))
+})
+
+test('pick_up_ground_items preflight names what it refuses and probes the inventory of every item it found', async () => {
+  const f = pickupFixture()
+  f.probe = { ok: true, tick: 120, actor_id: 7, position: { x: 0, y: 0 }, items: { 'iron-ore': 10, stone: 0 } }
+  const prepared = await f.bridge.prepare(pickup, 'run/pickup')
+  assert.ok(f.calls.some(command => command.includes('remote.call("autorio_preflight","operation","pick_up_ground_items",{x=3.4,y=-2.7,radius=1})')))
+  assert.match(f.calls.at(-1), /\{'iron-ore','stone'\}/, 'each found item once')
+  assert.deepEqual(prepared.observed_before.items, { 'iron-ore': 10, stone: 0 })
+  // The runtime passes the names in observed_before back for the receipt's after-probe.
+  await f.bridge.effectProbe(pickup, Object.keys(prepared.observed_before.items))
+  assert.match(f.calls.at(-1), /\{'iron-ore','stone'\}/)
+  for (const code of ['no_ground_items', 'ground_items_over_limit', 'inventory_full']) {
+    f.preflight = { ok: false, code }
+    await assert.rejects(f.bridge.prepare(pickup, 'run/pickup'), error => error.notSent && error.details.native_code === code
+      && !/Re-observe the target before choosing different arguments/.test(error.publicMessage))
+  }
+})
+
+test('a placement refused by an item on the ground points at pick_up_ground_items', async () => {
+  const f = fixture(); f.state.status.placement_no_clear_supported = true
+  f.preflight = { ok: false, code: 'placement_footprint_occupied', blockers: [{ name: 'item-on-ground', type: 'item-entity', position: { x: 1, y: 2 }, item: 'iron-ore' }] }
+  await assert.rejects(f.bridge.prepare({ name: 'place_entity', args: { entity_name: 'stone-furnace', x: 0, y: 0 } }, 'run/blocked'),
+    error => /picked up first with pick_up_ground_items/.test(error.publicMessage))
+})
+
+test('pick_up_ground_items submit rechecks capability, range and the box atomically, and a refusal is not admitted', async () => {
+  const f = pickupFixture()
+  const prepared = await f.bridge.prepare(pickup, 'run/pickup')
+  f.onSubmit = command => {
+    assert.ok(command.includes('if s.external_ground_pickup_supported~=1 then return "ground_pickup_capability_missing" end'))
+    assert.ok(command.includes('(p.x-(3.4))^2+(p.y-(-2.7))^2>16384 then return "walk_out_of_range"'))
+    assert.ok(command.includes('local p=remote.call("autorio_preflight","operation","pick_up_ground_items",{x=3.4,y=-2.7,radius=1}); if p.ok~=true then return "preflight_rejected"'))
+    assert.ok(command.includes('remote.call("autorio_operations","pick_up_ground_items",3.4,-2.7,1)'))
+    assert.ok(!command.includes('placement_no_clear_supported'), 'a pickup is not a placement')
+    return `${command.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)[0]}${JSON.stringify({ ok: false, result: 'external_guard_refused:preflight_rejected:no_ground_items', prefix: {} })}`
+  }
+  await assert.rejects(f.bridge.submit(prepared), error => error.notAdmitted && error.code === 'preflight_rejected'
+    && error.details.native_code === 'no_ground_items')
+  f.onSubmit = command => `${command.match(/SGLUNA_RESULT_[a-f0-9]{24}:/)[0]}${JSON.stringify({ ok: false, result: 'external_guard_refused:ground_pickup_capability_missing', prefix: {} })}`
+  await assert.rejects(f.bridge.submit(prepared), error => error.notAdmitted && error.code === 'ground_pickup_capability_missing')
 })

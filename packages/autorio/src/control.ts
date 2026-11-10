@@ -41,6 +41,8 @@ import { new_navigation_controller } from './navigation'
 import { new_navigation_obstacle_recovery } from './navigation_obstacle_recovery'
 import { new_orientation_runtime } from './orientation_runtime'
 import { execute_placement_candidate, placement_candidate_preflight, freeze_fluid_preservation_candidate, initialize_fluid_preservation_history } from './placement_candidates'
+import { line_placement_preflight, line_placement_status, submit_line_placement } from './line_placement'
+import { ground_item_pickup_preflight, MAX_PICKUPS, pickup_args_refusal } from './ground_item_pickup'
 import { placement_item_preflight, planned_placement_footprint } from './placement_preflight'
 import { create_production_planning_remote_interface } from './production_planning_remote'
 import { create_prototype_knowledge_remote_interface, natural_harvest_source_names } from './prototype_knowledge'
@@ -62,6 +64,7 @@ import { register_area_reservations } from './area_reservation_ui'
 import { reservation_preflight, reserve_area } from './area_reservations'
 import { TaskStates } from './types'
 import { new_tick_sprint_guard } from './e2e_tick_sprint'
+import { new_measurement_sprint_guard } from './measurement_sprint'
 import { direction_towards } from './utils/direction'
 import { get_actor_inventory_items } from './utils/inventory'
 import { find_world_entities } from './npc_vision'
@@ -87,6 +90,14 @@ remote.add_interface('sgluna_tick_sprint', {
   seal: (reason: string) => tick_sprint.seal(reason),
   fail: (reason: string) => tick_sprint.fail(reason),
   safety_event: (reason: string) => tick_sprint.safety(reason),
+})
+const measurement_sprint = new_measurement_sprint_guard(peek_controlled_actor, () => task_manager.get_status_snapshot(),
+  () => remote.call('sgluna_deployment', 'status') as { allowed?: boolean, actor_id?: number, epoch?: number, connected_players?: number },
+  () => tick_sprint.status())
+remote.add_interface('sgluna_measurement_sprint', {
+  arm: (lease: Parameters<typeof measurement_sprint.arm>[0]) => measurement_sprint.arm(lease),
+  finish: (reason: string, measurement_id?: string) => measurement_sprint.finish(reason, measurement_id),
+  status: () => measurement_sprint.status(),
 })
 register_area_reservations(peek_controlled_actor, () => task_manager.player_state.task_state === TaskStates.IDLE)
 type Admission = typeof operation_admission
@@ -324,6 +335,10 @@ function operation_preflight(name: string, args: Record<string, any>) {
   if (name === 'research_technology') {
     return research_operation_preflight(actor, args.technology_name)
   }
+  // Every tile of an external line placement, read-only (line_placement.ts).
+  if (name === 'place_line') return line_placement_preflight(actor, args as any)
+  // The ground items an external pickup would take, read-only (ground_item_pickup.ts).
+  if (name === 'pick_up_ground_items') return ground_item_pickup_preflight(actor, args)
   if (name === 'harvest_product') {
     if (!actor || !actor.is_valid) return reject('no_actor')
     if (typeof args.product_name !== 'string' || !prototypes.item[args.product_name]) return reject('unknown_prototype')
@@ -625,6 +640,18 @@ remote.add_interface('autorio_operations', {
     if (result[0]) log(`[AUTORIO] New harvest_product task: ${product_name} +${count}, radius=${search_radius}`)
     return result
   },
+  // External harness only: the items lying on the ground in a box of at most 5x5 tiles, picked up with native mining.
+  // The preflight runs again inside the submit, so a box that emptied or a stack that no longer fits refuses before
+  // anything is queued. See ground_item_pickup.ts.
+  pick_up_ground_items: (x: number, y: number, radius: number = 0): [boolean, string] => {
+    if (pickup_args_refusal(x, y, radius)) return [false, 'invalid_pickup_args']
+    const checked = ground_item_pickup_preflight(get_controlled_actor(), { x, y, radius })
+    if (!checked.ok) return [false, (checked as { code: string }).code]
+    const size = radius * 2 + 1
+    const result = area_clearing_controller.submit(x, y, size, size, { item_entities_only: true, max_clears: MAX_PICKUPS })
+    if (result[0]) log(`[AUTORIO] New pick_up_ground_items task: center=(${x},${y}), radius=${radius}`)
+    return result
+  },
   clear_construction_area: (x: number, y: number, width: number, height: number): [boolean, string] => {
     const result = area_clearing_controller.submit(x, y, width, height)
     if (result[0]) log(`[AUTORIO] New clear_construction_area task: center=(${x},${y}), size=${width}x${height}`)
@@ -673,6 +700,18 @@ remote.add_interface('autorio_operations', {
     }
     return accepted
   },
+  // External harness only (the internal planner catalog does not list it): one bounded straight line of transport belts or
+  // small electric poles, one native placement task per tile, placement-only. See line_placement.ts.
+  place_line: (entity_name: string, x: number, y: number, direction: number, line_direction: number, count: number, spacing: number): [boolean, string | number] => {
+    const result = submit_line_placement(get_controlled_actor(), { entity_name, x, y, direction, line_direction, count, spacing }, {
+      submit_placement: (name, tile_x, tile_y, facing, options) => basic_operation_controller.submit_placement(name, tile_x, tile_y, facing, undefined, undefined, undefined, options),
+      cancel_all_tasks: reason => task_manager.cancel_all_tasks(reason),
+      status: () => task_manager.get_status_snapshot() as any,
+    })
+    if (result[0]) log(`[AUTORIO] New place_line task: line=${result[1]} ${count} x ${entity_name} from (${x}, ${y}) line_direction=${line_direction} spacing=${spacing} direction=${direction}`)
+    return result
+  },
+  line_placement_status: (batch_ref: string) => line_placement_status(batch_ref),
   rotate_entity: (unit_number: number, reverse: boolean = false, external_world_guard?: boolean): [boolean, string] => {
     const result = basic_operation_controller.submit_rotate_exact(unit_number, reverse, external_world_guard)
     if (result[0]) log(`[AUTORIO] New rotate_entity task: unit=${unit_number}, reverse=${reverse}`)
@@ -728,6 +767,8 @@ remote.add_interface('autorio_operations', {
       ...task_manager.get_status_snapshot(),
       placement_no_clear_supported: true,
       external_fluid_candidates_supported: 1,
+      external_line_placement_supported: 1,
+      external_ground_pickup_supported: 1,
       admission_journal: operation_admission.status().records,
       actor: actor?.status_snapshot(),
       actor_surface_index: actor?.surface.index,
@@ -819,13 +860,14 @@ function sweep_npc_vision(reason: string) {
 }
 
 script.on_init(() => { initialize_fluid_preservation_history(); sweep_npc_vision('on_init') })
-script.on_event(defines.events.on_player_created, () => tick_sprint.safety('player_created'))
+script.on_event(defines.events.on_player_created, () => { tick_sprint.safety('player_created'); measurement_sprint.safety('player_created') })
 script.on_event(defines.events.on_entity_damaged, event => {
-  if (event.entity.unit_number === peek_controlled_actor()?.character?.unit_number) tick_sprint.safety('actor_damaged')
+  if (event.entity.unit_number === peek_controlled_actor()?.character?.unit_number) { tick_sprint.safety('actor_damaged'); measurement_sprint.safety('actor_damaged') }
 })
 script.on_configuration_changed(() => {
   if (task_manager.player_state.task_state === TaskStates.PREPARING_PUMP_SITE) task_manager.cancel_all_tasks('pump_site_configuration_changed')
   invalidate_pump_preparation_proposals()
+  measurement_sprint.safety('configuration_changed')
   sweep_npc_vision('on_configuration_changed')
 })
 
@@ -841,6 +883,7 @@ let no_actor_found = false
 script.on_event(defines.events.on_tick, (_event) => {
   task_manager.initialize()
   tick_sprint.tick()
+  measurement_sprint.tick()
   if (!setup_complete) setup()
   tick_output_delivery_proofs()
   tick_starter_acceptance()

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -7,7 +8,7 @@ import { PassThrough } from 'node:stream'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { LIBRARY_COUNTS, LIBRARY_SOURCE, libraryMetadata, MAX_LIBRARY_RESULT_BYTES, readLibrary } from './library.mjs'
+import { LIBRARY_SCHEMA, LIBRARY_SOURCE, libraryMetadata, MAX_LIBRARY_RESULT_BYTES, openLibrary, readLibrary } from './library.mjs'
 import { MCP_TOOLS, startMcpServer } from './mcp-server.mjs'
 import { withMcpClient } from './mcp-call.mjs'
 import { openRuntime } from './runtime.mjs'
@@ -15,10 +16,11 @@ import { openRuntime } from './runtime.mjs'
 const sourceUrl = new URL(`../../${LIBRARY_SOURCE}`, import.meta.url)
 const pack = JSON.parse(await fs.readFile(sourceUrl))
 const everyEntry = [...pack.knowledge, ...pack.skills]
+const stageRecords = pack.knowledge_categories.find(category => category.id === 'stage').records
 
-test('library reads the leveled export: schema 2, asserted counts, unique valid ids, resolvable related ids', () => {
-  assert.equal(pack.schema, 2)
-  assert.deepEqual({ knowledge: pack.knowledge.length, skills: pack.skills.length }, LIBRARY_COUNTS)
+test('library reads the leveled export: current schema, reported counts, unique valid ids, resolvable related ids', () => {
+  assert.equal(pack.schema, LIBRARY_SCHEMA)
+  assert.deepEqual(libraryMetadata().counts, { knowledge: pack.knowledge.length, skills: pack.skills.length })
   const ids = new Set(everyEntry.map(entry => entry.id))
   assert.equal(ids.size, everyEntry.length)
   for (const entry of everyEntry) {
@@ -84,6 +86,37 @@ test('progression checkpoints knowledge is discoverable and linked from the rela
     assert.ok(entry.related_ids.includes(related))
     assert.ok((await readLibrary({ kind: 'skill', action: 'get', id: related })).entry.related_ids.includes(id))
   }
+})
+
+// Game stages are a knowledge sub-category: ordered records, methods by id, no stored numbers.
+test('stage category lists ordered game stages and each stage names existing methods', async () => {
+  const listed = await readLibrary({ kind: 'knowledge', action: 'search', category: 'stage' })
+  assert.deepEqual(listed.results.map(row => row.id), ['stage-manual-bootstrap', 'stage-burner-loops', 'stage-central-electricity',
+    'stage-electric-mining-transfers', 'stage-smelting-arrays', 'stage-sustained-consumption'])
+  assert.deepEqual(listed.results.map(row => row.order), [1, 2, 3, 4, 5, 6])
+  assert.ok(listed.results.every(row => row.category === 'stage' && row.kind === 'knowledge'))
+  const ids = new Set(everyEntry.map(entry => entry.id))
+  for (const stage of stageRecords) {
+    assert.ok(stage.methods.every(id => ids.has(id)), stage.id)
+    assert.doesNotMatch(JSON.stringify({ ...stage, methods: undefined }), /\d|bper (?:second|minute|tick)b/i, stage.id)
+    assert.ok(!ids.has(stage.id))
+  }
+  const burner = (await readLibrary({ kind: 'knowledge', action: 'get', id: 'stage-burner-loops' })).entry
+  assert.equal(burner.previous, 'stage-manual-bootstrap')
+  assert.equal(burner.next, 'stage-central-electricity')
+  assert.ok(burner.methods.some(row => row.id === 'burner-coal-loop' && row.kind === 'skill'))
+  assert.match(burner.reached_when.join(' '), /no agent action/)
+  const electricity = (await readLibrary({ kind: 'knowledge', action: 'search', category: 'stage', query: 'electricity', limit: 1 })).results[0]
+  assert.equal(electricity.id, 'stage-central-electricity')
+  assert.match(electricity.summary, /not the first build/)
+  // Plain knowledge search reaches stage records too; skills never do.
+  assert.ok((await readLibrary({ kind: 'knowledge', action: 'search', query: 'coal loop' })).results.some(row => row.id === 'stage-burner-loops'))
+  await assert.rejects(readLibrary({ kind: 'skill', action: 'get', id: 'stage-burner-loops' }), { code: 'library_entry_not_found' })
+  for (const input of [{ kind: 'skill', action: 'search', category: 'stage' }, { kind: 'knowledge', action: 'search', category: 'Era!' },
+    { kind: 'knowledge', action: 'get', id: 'stage-burner-loops', category: 'stage' }, { kind: 'knowledge', action: 'search' }]) {
+    await assert.rejects(readLibrary(input), { code: 'invalid_library_arguments' })
+  }
+  await assert.rejects(readLibrary({ kind: 'knowledge', action: 'search', category: 'era' }), { code: 'library_category_not_found' })
 })
 
 test('power/electricity search prioritizes power planning, not blanket owner aliases on burner methods', async () => {
@@ -155,7 +188,8 @@ test('actual process adapter reads the library from a fake read-only backend wit
   const code = `import {startMcpServer} from ${JSON.stringify(serverUrl)}; import {readLibrary} from ${JSON.stringify(libraryUrl)};
 const runtime=Object.fromEntries(['bindMachineDelivery','capabilities','context','observe','submit','get','cancel','resume'].map(key=>[key,()=>{throw new Error('world forbidden')} ]));runtime.library=readLibrary;await startMcpServer({runtime}).done;`
   await withMcpClient(async client => {
-    assert.match(client.initialize.result.instructions, /electricity FIRST/)
+    assert.match(client.initialize.result.instructions, /before planning each new part of the goal, search factorio_library/)
+    assert.match(client.initialize.result.instructions, /knowledge categories/)
     const r = await client.request('tools/call', { name: 'factorio_library', arguments: { kind: 'skill', action: 'search', query: 'electricity' } })
     assert.equal(r.result.structuredContent.results[0].id, 'steam-power-bootstrap')
     assert.equal(r.result.isError, false)
@@ -164,10 +198,76 @@ const runtime=Object.fromEntries(['bindMachineDelivery','capabilities','context'
 
 test('library capability metadata stays small and advertises the local typed advisory boundary', () => {
   const m = libraryMetadata()
-  assert.deepEqual(m.counts, LIBRARY_COUNTS)
+  assert.deepEqual(m.counts, { knowledge: pack.knowledge.length, skills: pack.skills.length })
+  assert.deepEqual(m.knowledge_categories.map(({ id, ordered, records }) => ({ id, ordered, records })), [{ id: 'stage', ordered: true, records: stageRecords.length }])
   assert.equal(m.source, LIBRARY_SOURCE)
   assert.equal(Object.hasOwn(m, 'donor_commit'), false)
   assert.equal(m.loading, 'on_demand')
   assert.equal(m.advisory_only, true)
   assert.ok(JSON.stringify(m).length < 500)
+})
+
+// The harness core is content-agnostic: prompt and tool text name no library id or category,
+// and goal acceptance (the owner's fuel bar) is not a harness prompt.
+test('MCP instructions name no library entry, record, category or prototype', () => {
+  const instructions = readFileSync(new URL('../../deploy/pterodactyl/runtime-v8/operator-mcp-server.mjs', import.meta.url), 'utf8').match(/instructions: '([^']*)'/)[1]
+  const text = [instructions, ...MCP_TOOLS.map(tool => JSON.stringify(tool))].join('\n')
+  const names = [...everyEntry.map(entry => entry.id), ...pack.knowledge_categories.flatMap(category => [category.id, ...category.records.map(record => record.id)])]
+  for (const name of names) assert.doesNotMatch(text, new RegExp(`(?<![\\w-])${name}(?![\\w-])`), name)
+  assert.doesNotMatch(instructions, /fuel|priming|bootstrap|owner/i)
+  // Prototype names belong to the game or a mod, not the prompt.
+  assert.doesNotMatch(instructions, /miner|drill|furnace|boiler|engine|belt|inserter|assembl|chest|pole/i)
+})
+
+// A different library, with other categories and record fields, loads through the same code.
+test('a second library with its own categories loads unchanged; malformed packs fail closed', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'sgluna-library-'))
+  t.after(() => fs.rm(directory, { recursive: true, force: true }))
+  const entry = (kind, id, extra = {}) => ({ content_type: kind, id, name: `Name ${id}`, summary: `Summary of ${id}`, ...extra })
+  const other = { schema: LIBRARY_SCHEMA,
+    knowledge: [entry('knowledge', 'rail-signals', { search_aliases: ['blocks'] })],
+    skills: [entry('skill', 'lay-track', { guidance: { steps: ['Survey the corridor'], related_ids: ['rail-signals'] } }), entry('skill', 'build-station')],
+    knowledge_categories: [
+      { id: 'era', name: 'Eras', summary: 'Ordered eras.', ordered: true, records: [
+        { id: 'era-steam', name: 'Steam era', summary: 'Before trains.', methods: ['lay-track'], entered_when: ['first locomotive runs'] },
+        { id: 'era-rail', name: 'Rail era', summary: 'Trains carry ore.', methods: ['build-station', 'rail-signals'], entered_when: ['a train completes a loop'] }] },
+      { id: 'glossary', name: 'Glossary', summary: 'Unordered terms.', ordered: false, records: [
+        { id: 'term-block', name: 'Block', summary: 'Track between signals.', aliases: ['segment'] }] }] }
+  const write = async (name, value) => { const file = path.join(directory, name); await fs.writeFile(file, JSON.stringify(value)); return file }
+  const library = openLibrary({ file: await write('other.json', other), source: 'test/other.json' })
+  const meta = library.metadata()
+  assert.deepEqual(meta.counts, { knowledge: 1, skills: 2 })
+  assert.deepEqual(meta.knowledge_categories.map(({ id, ordered, records }) => ({ id, ordered, records })),
+    [{ id: 'era', ordered: true, records: 2 }, { id: 'glossary', ordered: false, records: 1 }])
+  const eras = await library.read({ kind: 'knowledge', action: 'search', category: 'era' })
+  assert.deepEqual(eras.results.map(row => [row.id, row.order]), [['era-steam', 1], ['era-rail', 2]])
+  assert.equal(eras.provenance.source, 'test/other.json')
+  const rail = (await library.read({ kind: 'knowledge', action: 'get', id: 'era-rail' })).entry
+  assert.deepEqual([rail.previous, rail.next, rail.of], ['era-steam', null, 2])
+  assert.deepEqual(rail.entered_when, ['a train completes a loop'])
+  assert.deepEqual(rail.methods.map(row => [row.kind, row.id]), [['skill', 'build-station'], ['knowledge', 'rail-signals']])
+  const term = (await library.read({ kind: 'knowledge', action: 'get', id: 'term-block' })).entry
+  assert.equal(term.order, undefined)
+  assert.deepEqual(term.search_aliases, ['segment'])
+  assert.equal((await library.read({ kind: 'knowledge', action: 'search', query: 'segment' })).results[0].id, 'term-block')
+  assert.equal((await library.read({ kind: 'knowledge', action: 'search', category: 'glossary', query: 'loop' })).total_matches, 0)
+  await assert.rejects(library.read({ kind: 'knowledge', action: 'search', category: 'stage' }), { code: 'library_category_not_found' })
+  // Opening another library leaves the shipped one untouched.
+  assert.equal(libraryMetadata().source, LIBRARY_SOURCE)
+
+  const [era] = other.knowledge_categories
+  const withRecord = record => ({ ...other, knowledge_categories: [{ ...era, records: [{ ...era.records[0], ...record }] }] })
+  const broken = [
+    { ...other, schema: LIBRARY_SCHEMA - 1 },
+    withRecord({ methods: ['missing-entry'] }),
+    withRecord({ id: 'lay-track' }),
+    withRecord({ next: ['shadows the view'] }),
+    withRecord({ entered_when: 'not a list' }),
+    { ...other, knowledge_categories: [era, era] },
+    { ...other, knowledge_categories: [{ ...other.knowledge_categories[1], id: 'Bad Id' }] },
+  ]
+  for (const [index, value] of broken.entries()) {
+    const bad = openLibrary({ file: await write(`broken-${index}.json`, value), source: 'test/broken.json' })
+    await assert.rejects(bad.read({ kind: 'skill', action: 'search', query: 'track' }), { code: 'library_integrity_failed' }, `broken ${index}`)
+  }
 })

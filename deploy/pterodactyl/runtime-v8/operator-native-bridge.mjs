@@ -2,11 +2,12 @@ import { randomBytes, randomUUID } from 'node:crypto'
 
 import { nativeAdmissionJournal } from '../staging/native-admission-journal.mjs'
 import { executeAuthorizedBatch } from '../staging/supervisor-adapter.mjs'
-import { luaString, PolicyError } from '../staging/structured-policy.mjs'
+import { factorioName, luaString, PolicyError } from '../staging/structured-policy.mjs'
 import { machineDeliveryToolDefinition, validateMachineDeliveryBindingArgs } from './machine-delivery.mjs'
 import {
   batchWatermark,
   buildPendingOperation,
+  operationIdentity,
   operationSignature,
   reconcilePendingOperation,
 } from './operation-reconciliation.mjs'
@@ -23,7 +24,48 @@ import {
 // require live geometry/fluid witnesses, never membership in a prototype list.
 export const PLACEMENT_PROTOTYPES = Object.freeze([])
 export const FLUID_PLACEMENT_PROTOTYPES = Object.freeze([])
-export const OPERATION_NAMES = Object.freeze(['wait', 'walk_to_position', 'craft_item', 'mine_resource_at', 'move_items_exact', 'place_entity', 'harvest_product', 'research_technology', 'place_candidate', 'set_machine_recipe', 'walk_to_entity', 'walk_to_entity_exact', 'gather_resource', 'supply_entity', 'mine_entity_exact', 'rotate_entity', 'prepare_pump_site', 'clear_construction_area', 'set_auto_defense', 'equip_weapon', 'equip_ammo', 'equip_armor', 'select_weapon_slot', 'attack_nearest_enemy', 'clear_enemy_area', 'launch_rocket'])
+export const OPERATION_NAMES = Object.freeze(['wait', 'walk_to_position', 'craft_item', 'mine_resource_at', 'move_items_exact', 'place_entity', 'harvest_product', 'research_technology', 'place_candidate', 'set_machine_recipe', 'walk_to_entity', 'walk_to_entity_exact', 'gather_resource', 'supply_entity', 'mine_entity_exact', 'rotate_entity', 'prepare_pump_site', 'clear_construction_area', 'set_auto_defense', 'equip_weapon', 'equip_ammo', 'equip_armor', 'select_weapon_slot', 'attack_nearest_enemy', 'clear_enemy_area', 'launch_rocket', 'place_line', 'pick_up_ground_items'])
+// place_line is external-only: this bridge parses and renders it (the shared runtime-v8 catalog and the internal planner
+// prompts do not list it). One admitted operation places a straight run, one native placement task per tile, in order.
+// It names no prototype: any entity the native nonfluid placement path accepts may be placed, one per tile, provided the
+// tiles' footprints do not overlap each other (checked natively, line_tiles_overlap).
+export const LINE_PLACEMENT_DOMAIN = 'native-nonfluid-non-overlapping'
+export const MAX_LINE_PLACEMENTS = 32
+export const MAX_LINE_SPACING = 8
+const LINE_DIRECTIONS = Object.freeze([0, 4, 8, 12])
+const LINE_ARGUMENTS = Object.freeze(['entity_name', 'x', 'y', 'direction', 'line_direction', 'count', 'spacing'])
+const LINE_OPERATION = Object.freeze({
+  name: 'place_line', args: [...LINE_ARGUMENTS], external_only: true,
+  arguments: {
+    entity_name: { kind: 'runtime_candidate', required: true, defaulted: false, provenance: 'placeable_inventory_entities' },
+    x: { kind: 'planner_numeric', required: true, defaulted: false },
+    y: { kind: 'planner_numeric', required: true, defaulted: false },
+    direction: { kind: 'closed_enum', required: false, defaulted: true, default: 0, values: [...LINE_DIRECTIONS] },
+    line_direction: { kind: 'closed_enum', required: true, defaulted: false, values: [...LINE_DIRECTIONS] },
+    count: { kind: 'bounded_integer', required: true, defaulted: false, minimum: 1, maximum: MAX_LINE_PLACEMENTS },
+    spacing: { kind: 'bounded_integer', required: false, defaulted: true, default: 1, minimum: 1, maximum: MAX_LINE_SPACING },
+  },
+  scopes: ['construction'], preflight: true, risk: 'high',
+})
+const MAX_LINE_COORDINATE = 1000000
+// pick_up_ground_items is external-only as well: the items lying on the ground in a box of at most 5x5 tiles, picked up
+// with the character's native mining. Nothing else in the box is mined, and placement still never clears.
+export const MAX_PICKUP_RADIUS = 2
+export const MAX_PICKUP_ITEMS = 16
+const PICKUP_ARGUMENTS = Object.freeze(['x', 'y', 'radius'])
+const PICKUP_OPERATION = Object.freeze({
+  name: 'pick_up_ground_items', args: [...PICKUP_ARGUMENTS], external_only: true,
+  arguments: {
+    x: { kind: 'planner_numeric', required: true, defaulted: false },
+    y: { kind: 'planner_numeric', required: true, defaulted: false },
+    radius: { kind: 'bounded_integer', required: false, defaulted: true, default: 0, minimum: 0, maximum: MAX_PICKUP_RADIUS },
+  },
+  scopes: ['construction'], preflight: true, risk: 'medium',
+})
+export function lineTiles({ x, y, line_direction, count, spacing }) {
+  const step = { 0: [0, -1], 4: [1, 0], 8: [0, 1], 12: [-1, 0] }[line_direction]
+  return Array.from({ length: count }, (_, index) => ({ index, x: x + step[0] * spacing * index, y: y + step[1] * spacing * index }))
+}
 export const OBSERVATION_NAMES = Object.freeze([
   'getActorStatus', 'getInventoryItems', 'getEquipmentStatus', 'getRecipeDetails',
   'getPrototypeDetails', 'discoverPrototypes', 'getNearbyEntities', 'getEntityStatus',
@@ -38,8 +80,10 @@ export const observationDefinitions = toolDefinitions.filter(tool => OBSERVATION
 // 2026-11-01 trial. Facts about this bridge, not strategy advice.
 export const OPERATION_NOTES = Object.freeze({
   craft_item: 'count is the number of recipe crafts, not items. A recipe with N products per craft yields count x N items (read getRecipeDetails products).',
-  place_entity: 'direction uses Factorio defines.direction values (0 north, 4 east, 8 south, 12 west). For inserters it names the pickup side; drop is opposite. Verify pickup/drop with getEntityGeometry after placement. getPlacementCandidates rows with external_footprint.eligible=false will be refused. Use mine_entity_exact for custody-backed removal when native removal_readiness permits it; protected, active, nonempty or unproved hydraulic networks and unsupported contents are refused.',
+  place_entity: 'direction uses Factorio defines.direction values (0 north, 4 east, 8 south, 12 west). For inserters it names the pickup side; drop is opposite. Verify pickup/drop with getEntityGeometry after placement. getPlacementCandidates rows with external_footprint.eligible=false will be refused. Use mine_entity_exact for custody-backed removal when native removal_readiness permits it; protected, active, nonempty or unproved hydraulic networks and unsupported contents are refused. Items on the ground in a footprint can be picked up with pick_up_ground_items.',
   place_candidate: 'A fluid candidate that joins an entity (connects_to) needs the native preservation guard to prove that entity\'s whole connected fluid network, at most 16 entities. getPlacementCandidates reports this as connects_to.preservation_network (provable, entity_count, limit; unit_number names an entity the guard cannot read, for example one not visible now) and marks such candidates external_preservation.eligible=false. They are refused before they are sent. A join to a network of 16 brings it to 17; a network of 17 or more cannot be joined.',
+  place_line: `Places count (1-${MAX_LINE_PLACEMENTS}) entities of entity_name (any prototype place_entity accepts) in a straight line, one native placement per tile in order: tile i is at (x, y) plus i x spacing (1-${MAX_LINE_SPACING}, default 1) tiles toward line_direction (0 north, 4 east, 8 south, 12 west). direction (default 0) is each entity's own facing; for belts it is the flow direction. x, y is the exact grid centre of tile 0. Before sending, every tile is checked like place_entity (exact grid, can_place_entity, the external footprint rule, within 128 tiles of the actor) and the actor must hold count items; any failure refuses the whole line with details.tile_index and nothing is placed. The actor's own character does not block a tile in this check: during execution it walks into build reach and steps out of any tile it stands on before placing it. Any other character still blocks. If a tile becomes blocked during execution the line stops there: the receipt is partial, line_placement.placed lists each placed entity (index, unit_number, position) and line_placement.refusal names the first refused tile. Nothing is cleared or replaced.`,
+  pick_up_ground_items: `Picks up the items lying on the ground (item-on-ground entities, for example ore a drill dropped, or an item listed as a placement blocker) in the square box centred on (x, y) with half-width radius + 0.5 tiles: radius 0 (the default) is one tile, radius ${MAX_PICKUP_RADIUS} (the maximum) is 5x5. The actor walks into reach and mines each item stack, as a player picks items up, into its inventory. Nothing else in the box is mined: no tree, rock, building, resource or character. As with every walk, navigation may clear a tree or rock that blocks the only path. Before sending, the box must hold 1-${MAX_PICKUP_ITEMS} ground stacks, each of which fits the actor inventory now, within 128 tiles of the actor; otherwise it is refused (no_ground_items, ground_items_over_limit, inventory_full). A completed receipt means the box held no ground items when the task ended; observed_effect has the inventory delta for each item the preflight found. If the inventory fills during the task, or items keep landing in the box (${MAX_PICKUP_ITEMS * 2} pickups), the task stops and the receipt is cancelled.`,
   research_technology: 'A completed receipt means research was started and queued, not finished. While other force research is active the request is appended behind it in the native queue (queued_behind) and the labs reach it when the earlier work finishes; queue the next technology before the current one completes so labs never idle. Read getResearchStatus or getTechnology for progress and researched.',
   walk_to_position: 'Target must be within 128 tiles of the current actor position.',
   move_items_exact: 'Name-targeted transfers use getNearbyEntities/findLongRangeEntities to select an exact unit, with no fallback after target loss. May walk the actor into reach first. A terminal receipt includes observed_effect with the actor inventory delta for item_name and the actor position before and after.',
@@ -57,14 +101,15 @@ export const OPERATION_NOTES = Object.freeze({
 export const OBSERVATION_NOTES = Object.freeze({
   getNearbyEntities: 'radius is centred on the actor\'s current position (actor_position in the result), not where an earlier call ran. Operations that walk the actor move that centre.',
   getEntityStatus: 'Reads only chunks the force sees live now (Factorio force chunk visibility: near the actor, or radar coverage). entity_not_visible means there is no live vision there, not that the entity is gone. status and status_name are the native defines.entity_status values.',
+  getResearchStatus: 'available lists up to 24 technologies the force can research now (enabled, not researched, every prerequisite researched), each with the recipes it unlocks (unlocks, up to 12), its science ingredients and unit count, or trigger_type for a technology completed by its trigger instead of labs. getTechnology({name}) also lists unlocks for any technology.',
 })
 export function capabilities() {
-  return { operations: operationTypeCatalog().filter(operation => OPERATION_NAMES.includes(operation.name)),
+  return { operations: [...operationTypeCatalog().filter(operation => OPERATION_NAMES.includes(operation.name)), structuredClone(LINE_OPERATION), structuredClone(PICKUP_OPERATION)],
     goal_metadata_tools: [{ name: machineDeliveryToolDefinition.function.name, description: machineDeliveryToolDefinition.function.description,
       inputSchema: machineDeliveryToolDefinition.function.parameters, world_mutation: false, operation_authority: false }],
     observations: [...OBSERVATION_NAMES], observation_schemas: observationDefinitions.map(tool => ({
       name: tool.function.name, description: tool.function.description, inputSchema: tool.function.parameters,
-    })), limits: { wait_ticks: 3600, count: 100, transfer_count: 1000, walk_distance: 128, fluid_network_entities: 16, placement_prototypes: [...PLACEMENT_PROTOTYPES], fluid_candidate_prototypes: [...FLUID_PLACEMENT_PROTOTYPES], harvest_radius: 64, placement_requires_exact_grid: true, placement_clearing: false, placement_domain: 'native-nonfluid-or-proven-fluid-candidate', recipe_domain: 'native-compatible-empty-isolated-assembling-machine' },
+    })), limits: { wait_ticks: 3600, count: 100, transfer_count: 1000, walk_distance: 128, fluid_network_entities: 16, placement_prototypes: [...PLACEMENT_PROTOTYPES], fluid_candidate_prototypes: [...FLUID_PLACEMENT_PROTOTYPES], harvest_radius: 64, placement_requires_exact_grid: true, placement_clearing: false, line_domain: LINE_PLACEMENT_DOMAIN, line_count: MAX_LINE_PLACEMENTS, line_spacing: MAX_LINE_SPACING, pickup_radius: MAX_PICKUP_RADIUS, pickup_items: MAX_PICKUP_ITEMS, placement_domain: 'native-nonfluid-or-proven-fluid-candidate', recipe_domain: 'native-compatible-empty-isolated-assembling-machine' },
     operation_notes: { ...OPERATION_NOTES }, observation_notes: { ...OBSERVATION_NOTES } }
 }
 
@@ -104,16 +149,53 @@ function identity(pending) {
     && typeof pending.attempt_id === 'string' && /^[a-z0-9_/-]{1,120}$/i.test(pending.attempt_id)
     && /^[a-f0-9]{64}$/.test(pending.signature), 'invalid_pending_identity')
 }
+function lineArgsLua(args) {
+  return `{entity_name=${luaString(args.entity_name)},x=${args.x},y=${args.y},direction=${args.direction},line_direction=${args.line_direction},count=${args.count},spacing=${args.spacing}}`
+}
 // Any non-resource entity in the footprint blocks external placement, including
 // items on the ground and characters that can_place_entity (and therefore the
 // native candidate search) accepts. One Lua definition serves placement preflight
 // and candidate annotation so they cannot disagree. It names up to eight blockers
 // so the operator can tell an item on the ground from a real structure; clearing
 // is still never attempted.
-const FOOTPRINT_RULE_LUA = 'local function external_footprint(surface,box) local found=surface.find_entities_filtered({area=box,limit=129}); if #found>=129 then return "placement_footprint_dense",{} end; local blockers={}; for _,e in pairs(found) do if e.valid and e.type~="resource" and #blockers<8 then blockers[#blockers+1]={name=e.name,type=e.type,position=e.position,unit_number=e.unit_number,item=e.type=="item-entity" and e.stack and e.stack.valid_for_read and e.stack.name or nil} end end; if #blockers>0 then return "placement_footprint_occupied",blockers end; return nil,blockers end;'
-const FOOTPRINT_CHECK_LUA = 'local code,blockers=external_footprint(surface,f.world_box); if code=="placement_footprint_dense" then return {ok=false,code=code} end; if code then return {ok=false,code=code,blockers=blockers,planned_footprint=f} end;'
+const FOOTPRINT_RULE_LUA = 'local function external_footprint(surface,box,own,placed) local pp=placed and prototypes.entity[placed]; local ok_mask,mask=pcall(function() return pp.collision_mask.layers end); if not ok_mask or type(mask)~="table" then mask=nil end; local found=surface.find_entities_filtered({area=box,limit=129}); if #found>=129 then return "placement_footprint_dense",{} end; local blockers={}; local function blocks(e) if e.type=="item-entity" or e.type=="character" or not mask then return true end; local ok,layers=pcall(function() return e.prototype.collision_mask.layers end); if not ok or type(layers)~="table" then return true end; for k,on in pairs(layers) do if on and mask[k] then return true end end; return false end; for _,e in pairs(found) do if e.valid and e.type~="resource" and e.name~="sgluna-npc-vision" and not (own and e.type=="character" and e.unit_number==own) and #blockers<8 and blocks(e) then blockers[#blockers+1]={name=e.name,type=e.type,position=e.position,unit_number=e.unit_number,item=e.type=="item-entity" and e.stack and e.stack.valid_for_read and e.stack.name or nil} end end; if #blockers>0 then return "placement_footprint_occupied",blockers end; return nil,blockers end;'
+// When can_place_entity refuses, name what collides with the placed prototype: entities first (same rule as above),
+// otherwise up to four terrain tiles (type "tile"). Diagnostic only; an empty list means the cause was not found.
+const NOT_CLEAR_LUA = 'local function not_clear_blockers(surface,box,placed) local _,b=external_footprint(surface,box,nil,placed); b=b or {}; if #b>0 then return b end; pcall(function() local mask=prototypes.entity[placed].collision_mask.layers; for _,t in pairs(surface.find_tiles_filtered({area=box,limit=64})) do if #b>=4 then break end; for k,on in pairs(mask) do if on and t.collides_with(k) then b[#b+1]={name=t.name,type="tile",position=t.position}; break end end end end); return b end;'
+const footprintCheckLua = placed => `local code,blockers=external_footprint(surface,f.world_box,nil,${placed}); if code=="placement_footprint_dense" then return {ok=false,code=code} end; if code then return {ok=false,code=code,blockers=blockers,planned_footprint=f} end;`
+// An admission-time preflight refusal carries its native cause in the guard's refusal text, the only channel the shared batch
+// executor returns before any admission: ":code", "@tile_index" and up to eight ";type:name:item:x:y" blockers, each field
+// restricted to prototype-name characters and two-decimal coordinates. parseGuardRefusal reads it back.
+const REFUSAL_DETAIL_LUA = '(function(p) local function id(v) return type(v)=="string" and string.match(v,"^[a-z0-9_-]+$") and string.sub(v,1,64) or nil end; local c=type(p.code)=="string" and string.match(p.code,"^[a-z0-9_]+$") and string.sub(p.code,1,80) or "unknown"; local out=":"..c; local t=p.tile_index; if type(t)=="number" and t>=0 and t<1000 and t==math.floor(t) then out=out.."@"..string.format("%d",t) end; if type(p.blockers)=="table" then for i,b in ipairs(p.blockers) do if i>8 then break end; local x=type(b)=="table" and b.position and tonumber(b.position.x); local y=type(b)=="table" and b.position and tonumber(b.position.y); if x and y and math.abs(x)<1e6 and math.abs(y)<1e6 then out=out..";"..(id(b.type) or "unknown")..":"..(id(b.name) or "unknown")..":"..(id(b.item) or "")..":"..string.format("%.2f",x)..":"..string.format("%.2f",y) end end end; return out end)'
+const GUARD_CODES = 'session_or_actor_changed|nonstandard_game_speed|native_busy|ordinal_not_fresh|unresolved_native_operation|preflight_rejected|walk_out_of_range|placement_safety_capability_missing|fluid_safety_capability_missing|line_placement_capability_missing|ground_pickup_capability_missing|native_generation_changed'
+const GUARD_REFUSAL = new RegExp(String.raw`^external_guard_refused:(${GUARD_CODES})(?::([a-z0-9_]{1,80})(?:@(\d{1,3}))?((?:;[a-z0-9_-]{1,64}:[a-z0-9_-]{1,64}:[a-z0-9_-]{0,64}:-?\d{1,7}\.\d{2}:-?\d{1,7}\.\d{2}){0,8}))?$`)
+
+// The guard code, plus the native cause when an admission-time preflight refused. Undefined for any other text.
+export function parseGuardRefusal(text) {
+  const match = GUARD_REFUSAL.exec(typeof text === 'string' ? text : '')
+  if (!match) return undefined
+  const [, code, nativeCode, tile, blockerText] = match
+  if (nativeCode === undefined) return { code }
+  if (code !== 'preflight_rejected') return undefined
+  const blockers = (blockerText ?? '').split(';').slice(1).map(part => {
+    const [type, name, item, x, y] = part.split(':')
+    return { name, type, position: { x: Number(x), y: Number(y) }, ...(item ? { item } : {}) }
+  })
+  return { code, details: { native_code: nativeCode, ...(tile !== undefined ? { tile_index: Number(tile) } : {}), ...(blockers.length ? { blockers } : {}) } }
+}
 
 function preflightExpression(operation) {
+  if (operation.name === 'place_line') {
+    // The native preflight checks every tile (items for the whole line, nonfluid witness, exact grid, reservation, manual
+    // can_place_entity, the external footprint rule); this re-applies the bridge's own footprint rule to each returned tile
+    // so preflight and candidate annotation keep one definition. Read-only; rerun inside atomic admission.
+    const { entity_name: name, count } = operation.args
+    return `(function() ${FOOTPRINT_RULE_LUA} local p=remote.call("autorio_preflight","operation","place_line",${lineArgsLua(operation.args)}); if p.ok~=true then return p end; local w=p.preservation_nonfluid_output; if not w or w.fluid_port_count~=0 or w.entity_name~=${luaString(name)} or type(p.tiles)~="table" or #p.tiles~=${count} then return {ok=false,code="nonfluid_footprint_unproven"} end; local surface=game.surfaces[w.surface_index]; if not surface then return {ok=false,code="nonfluid_footprint_unproven"} end; local own=remote.call("sgluna_deployment","status").actor_id; for i,t in ipairs(p.tiles) do local f={position=t.position,world_box=t.world_box}; local code,blockers=external_footprint(surface,t.world_box,own,${luaString(name)}); if code=="placement_footprint_dense" then return {ok=false,code=code,tile_index=i-1} end; if code then return {ok=false,code=code,tile_index=i-1,blockers=blockers,planned_footprint=f} end end; return p end)()`
+  }
+  if (operation.name === 'pick_up_ground_items') {
+    const a = operation.args
+    return `remote.call("autorio_preflight","operation","pick_up_ground_items",{x=${a.x},y=${a.y},radius=${a.radius}})`
+  }
   const command = renderOperationPreflight(operation)
   if (!command) return '{ok=true,validation="not_required"}'
   check(command.startsWith(JSON_PREFIX) && command.endsWith('))'), 'preflight_renderer_changed')
@@ -123,31 +205,52 @@ function preflightExpression(operation) {
   }
   if (operation.name === 'walk_to_entity_exact') return `(function() local p=${expression}; if p.ok~=true then return p end; local s=remote.call("autorio_operations","status"); local a=s.actor and s.actor.position; local t=p.target and p.target.position; if not a or not t or (a.x-t.x)^2+(a.y-t.y)^2>16384 then return {ok=false,code="walk_out_of_range"} end; return p end)()`
   if (!['place_entity', 'place_candidate'].includes(operation.name)) return expression
-  if (operation.name === 'place_candidate') return `(function() ${FOOTPRINT_RULE_LUA} local p=${expression}; if p.ok~=true then return p end; local f=p.planned_footprint; local n=f and f.entity_name; if not f or not f.world_box or p.preservation_clears_count~=0 then return {ok=false,code="external_candidate_unproven"} end; local actor=remote.call("sgluna_deployment","status"); local surface=game.surfaces[actor.surface_index]; if not surface then return {ok=false,code="external_candidate_unproven"} end; ${FOOTPRINT_CHECK_LUA} return p end)()`
+  if (operation.name === 'place_candidate') return `(function() ${FOOTPRINT_RULE_LUA} local p=${expression}; if p.ok~=true then return p end; local f=p.planned_footprint; local n=f and f.entity_name; if not f or not f.world_box or p.preservation_clears_count~=0 then return {ok=false,code="external_candidate_unproven"} end; local actor=remote.call("sgluna_deployment","status"); local surface=game.surfaces[actor.surface_index]; if not surface then return {ok=false,code="external_candidate_unproven"} end; ${footprintCheckLua('n')} return p end)()`
   const { entity_name: name, x, y, direction = 0 } = operation.args
   // Consume the same native footprint and nonfluid witness as the full runtime;
   // never infer dimensions, snapping or fluid ports from a vanilla name.
-  return `(function() ${FOOTPRINT_RULE_LUA} local p=${expression}; if p.ok~=true then return p end; local w=p.preservation_nonfluid_output; local f=p.planned_footprint; if not w or w.fluid_port_count~=0 or w.entity_name~=${luaString(name)} or not f or not f.world_box then return {ok=false,code="nonfluid_footprint_unproven"} end; if f.position.x~=${x} or f.position.y~=${y} then return {ok=false,code="exact_grid_required",planned_footprint=f} end; local surface=game.surfaces[w.surface_index]; local force=game.forces[w.force_index]; if not surface or not force or not surface.can_place_entity({name=${luaString(name)},position=f.position,direction=${direction},force=force,build_check_type=defines.build_check_type.manual}) then return {ok=false,code="placement_not_clear"} end; ${FOOTPRINT_CHECK_LUA} return p end)()`
+  return `(function() ${FOOTPRINT_RULE_LUA} local p=${expression}; if p.ok~=true then return p end; local w=p.preservation_nonfluid_output; local f=p.planned_footprint; if not w or w.fluid_port_count~=0 or w.entity_name~=${luaString(name)} or not f or not f.world_box then return {ok=false,code="nonfluid_footprint_unproven"} end; if f.position.x~=${x} or f.position.y~=${y} then return {ok=false,code="exact_grid_required",planned_footprint=f} end; local surface=game.surfaces[w.surface_index]; local force=game.forces[w.force_index]; if not surface or not force or not surface.can_place_entity({name=${luaString(name)},position=f.position,direction=${direction},force=force,build_check_type=defines.build_check_type.manual}) then ${NOT_CLEAR_LUA} return {ok=false,code="placement_not_clear",blockers=not_clear_blockers(surface,f.world_box,${luaString(name)}),planned_footprint=f} end; ${footprintCheckLua(luaString(name))} return p end)()`
 }
 
 const ANNOTATED_CANDIDATES = 8 // getPlacementCandidates limit maximum
 
 const PREFLIGHT_HINTS = Object.freeze({
-  placement_footprint_occupied: 'The footprint contains non-resource entities (see details.blockers). getPlacementCandidates marks such candidates external_footprint.eligible=false; external placement refuses items on the ground and characters and never clears them. Choose another position.',
-  placement_not_clear: 'can_place_entity refused this exact position and direction. Read fresh getPlacementCandidates for the same prototype.',
+  placement_footprint_occupied: 'The footprint contains non-resource entities that collide or must not be built over (see details.blockers); as in native placement, an entity whose collision layers do not overlap the placed entity, such as a tree stump under a belt, does not count. getPlacementCandidates marks such candidates external_footprint.eligible=false; external placement refuses items on the ground and characters and never clears them. Items on the ground (type item-entity) can be picked up first with pick_up_ground_items at their position; otherwise choose another position.',
+  placement_not_clear: 'can_place_entity refused this exact position and direction. details.blockers names what collides with the prototype when found: entities, or terrain tiles (type tile). Read fresh getPlacementCandidates for the same prototype.',
   exact_grid_required: 'The native footprint snaps to a different center; use details.planned_footprint.position exactly.',
   placement_footprint_dense: 'The footprint area holds too many entities to inspect; choose another position.',
   nonfluid_footprint_unproven: 'No native zero-fluidbox witness for this prototype at this site; use place_candidate for fluid prototypes.',
+  line_placement_items_insufficient: 'The actor does not hold enough items for the whole line (details.placement_item: required_count, held_count). Craft or fetch the shortfall, or shorten count.',
+  npc_area_reserved: 'A tile of the line lies in an area the NPC has reserved for other construction.',
+  invalid_line_args: 'The native line validation refused the arguments (details.field).',
+  line_tiles_overlap: 'This prototype is wider than spacing: the footprint at details.tile_index overlaps the previous one. Increase spacing.',
+  no_ground_items: 'The box holds no items on the ground now; nothing to pick up. Re-observe the position (getNearbyEntities) if a placement named an item blocker.',
+  ground_items_over_limit: `The box holds more than ${MAX_PICKUP_ITEMS} ground item stacks; use a smaller radius.`,
+  inventory_full: 'An item stack in the box does not fit the actor inventory now. Free inventory space first (for example insert items into a chest), then pick up again.',
+  invalid_pickup_args: 'The native pickup validation refused the arguments (details.field).',
 })
 
 function prototypeName(value) { return typeof value === 'string' && /^[a-z0-9_-]{1,100}$/.test(value) ? value : 'unknown' }
+// Entity and item names as the game reports them: modded names keep their case, digits and _ - . up to the
+// factorioName length (200). Native text reaching the model stays pattern-checked, so anything else (spaces,
+// punctuation) reads 'unknown'. Codes and engine types keep the strict lowercase prototypeName rule.
+function gameName(value) { return typeof value === 'string' && /^[A-Za-z0-9_.-]{1,200}$/.test(value) ? value : 'unknown' }
+
+// Resource tiles under a candidate footprint, by name (trial 4r: buildings landed on the ore patch with no way to see it).
+// A footprint box covers at most a few dozen tiles; the list is bounded anyway.
+function resourceCoverage(rows) {
+  const list = array(rows)
+  if (!Array.isArray(list)) return []
+  return list.slice(0, 8).filter(row => object(row) && Number.isSafeInteger(row.tiles) && row.tiles > 0)
+    .map(row => ({ name: gameName(row.name), tiles: Math.min(row.tiles, 256) }))
+}
 
 function footprintBlockers(rows) {
   return (Array.isArray(rows) ? rows : []).slice(0, 8).map(row => ({
-    name: prototypeName(row?.name), type: prototypeName(row?.type),
+    name: gameName(row?.name), type: prototypeName(row?.type),
     ...(Number.isFinite(row?.position?.x) && Number.isFinite(row?.position?.y) ? { position: { x: row.position.x, y: row.position.y } } : {}),
     ...(Number.isSafeInteger(row?.unit_number) ? { unit_number: row.unit_number } : {}),
-    ...(typeof row?.item === 'string' ? { item: prototypeName(row.item) } : {}) }))
+    ...(typeof row?.item === 'string' ? { item: gameName(row.item) } : {}) }))
 }
 
 function preflightFailure(preflight) {
@@ -155,21 +258,40 @@ function preflightFailure(preflight) {
   const blockers = Array.isArray(preflight?.blockers) ? footprintBlockers(preflight.blockers) : undefined
   const footprint = object(preflight?.planned_footprint) ? { position: preflight.planned_footprint.position, world_box: preflight.planned_footprint.world_box } : undefined
   const summary = blockers?.length ? ` Blockers: ${blockers.map(b => b.item ? `${b.type} (${b.item})` : `${b.name} [${b.type}]`).join(', ')}.` : ''
-  return new BridgeError('preflight_rejected', `Native preflight rejected: ${code}. The operation was not sent to the game.${summary} ${Object.hasOwn(PREFLIGHT_HINTS, code) ? PREFLIGHT_HINTS[code] : 'Re-observe the target before choosing different arguments.'}`.trim(),
-    { notAdmitted: true, details: { native_code: code, ...(blockers ? { blockers } : {}), ...(footprint ? { planned_footprint: footprint } : {}) } })
+  // place_line: which tile refused, and the item accounting for the whole line.
+  const tile = Number.isSafeInteger(preflight?.tile_index) && preflight.tile_index >= 0 ? preflight.tile_index : undefined
+  const item = object(preflight?.placement_item) && [preflight.placement_item.required_count, preflight.placement_item.held_count].every(Number.isSafeInteger)
+    ? { item_name: gameName(preflight.placement_item.item_name), required_count: preflight.placement_item.required_count, held_count: preflight.placement_item.held_count } : undefined
+  const field = typeof preflight?.field === 'string' && /^[a-z_]{1,40}$/.test(preflight.field) ? preflight.field : undefined
+  const where = tile !== undefined ? ` Line tile ${tile} refused.` : ''
+  const counts = item && code === 'line_placement_items_insufficient' ? ` Requires ${item.required_count} ${item.item_name}, holds ${item.held_count}.` : ''
+  return new BridgeError('preflight_rejected', `Native preflight rejected: ${code}. The operation was not sent to the game.${where}${counts}${summary} ${Object.hasOwn(PREFLIGHT_HINTS, code) ? PREFLIGHT_HINTS[code] : 'Re-observe the target before choosing different arguments.'}`.trim(),
+    { notAdmitted: true, details: { native_code: code, ...(tile !== undefined ? { tile_index: tile } : {}), ...(item ? { placement_item: item } : {}),
+      ...(field ? { field } : {}), ...(blockers ? { blockers } : {}), ...(footprint ? { planned_footprint: footprint } : {}) } })
 }
 
 // Items whose actor-inventory count an operation is expected to change. Used for
 // before/after observation only; never as attribution or goal proof.
-function effectItems(operation) {
+function effectItems(operation, found) {
+  // pick_up_ground_items: the items its preflight found in the box.
+  if (operation.name === 'pick_up_ground_items') return [...new Set((Array.isArray(found) ? found : []).filter(name => typeof name === 'string' && /^[a-z0-9_-]{1,100}$/.test(name)))].slice(0, MAX_PICKUP_ITEMS)
   const args = operation.args ?? {}
   const name = { craft_item: args.item_name, harvest_product: args.product_name, move_items_exact: args.item_name,
-    mine_resource_at: args.resource_name, place_entity: args.entity_name }[operation.name]
+    mine_resource_at: args.resource_name, place_entity: args.entity_name, place_line: args.entity_name }[operation.name]
   return typeof name === 'string' && /^[a-z0-9_-]{1,100}$/.test(name) ? [name] : []
 }
 
 export function renderExternalOperation(raw) {
   const operation = parseExternalOperation(raw)
+  if (operation.name === 'place_line') {
+    // Placement-only by construction: the native place_line queues every tile with refuse_clearance.
+    const a = operation.args
+    return `remote.call("autorio_operations","place_line",${luaString(a.entity_name)},${a.x},${a.y},${a.direction},${a.line_direction},${a.count},${a.spacing})`
+  }
+  if (operation.name === 'pick_up_ground_items') {
+    const a = operation.args
+    return `remote.call("autorio_operations","pick_up_ground_items",${a.x},${a.y},${a.radius})`
+  }
   const command = renderOperation(operation)
   // This safety argument is NOT model-selectable. The native endpoint forwards
   // it to the existing execution-time refuse_clearance task invariant.
@@ -187,7 +309,38 @@ function normalizedStatus(status) {
   })) }
 }
 
+// Exact keys and bounds; defaults are filled in so the signature is canonical.
+function parseLineOperation(raw) {
+  check(object(raw) && Object.keys(raw).every(key => key === 'name' || key === 'args') && object(raw.args), 'invalid_operation', 'place_line needs {name, args}')
+  const args = raw.args
+  const unknown = Object.keys(args).filter(key => !LINE_ARGUMENTS.includes(key))
+  check(unknown.length === 0, 'invalid_operation', `place_line does not accept ${unknown.join(', ')}; arguments are ${LINE_ARGUMENTS.join(', ')}`)
+  try { factorioName(args.entity_name) }
+  catch { check(false, 'invalid_operation', 'entity_name must be a prototype name') }
+  for (const key of ['x', 'y']) check(typeof args[key] === 'number' && Number.isFinite(args[key]) && Math.abs(args[key]) <= MAX_LINE_COORDINATE, 'invalid_operation', `${key} must be a finite tile-centre coordinate`)
+  const direction = args.direction ?? 0
+  check(LINE_DIRECTIONS.includes(direction), 'invalid_operation', 'direction must be 0, 4, 8 or 12')
+  check(LINE_DIRECTIONS.includes(args.line_direction), 'invalid_operation', 'line_direction must be 0, 4, 8 or 12')
+  check(Number.isSafeInteger(args.count) && args.count >= 1 && args.count <= MAX_LINE_PLACEMENTS, 'operation_limit', `count is bounded to 1-${MAX_LINE_PLACEMENTS}`)
+  const spacing = args.spacing ?? 1
+  check(Number.isSafeInteger(spacing) && spacing >= 1 && spacing <= MAX_LINE_SPACING, 'operation_limit', `spacing is bounded to 1-${MAX_LINE_SPACING}`)
+  return { name: 'place_line', args: { entity_name: args.entity_name, x: args.x, y: args.y, direction, line_direction: args.line_direction, count: args.count, spacing } }
+}
+
+function parsePickupOperation(raw) {
+  check(object(raw) && Object.keys(raw).every(key => key === 'name' || key === 'args') && object(raw.args), 'invalid_operation', 'pick_up_ground_items needs {name, args}')
+  const args = raw.args
+  const unknown = Object.keys(args).filter(key => !PICKUP_ARGUMENTS.includes(key))
+  check(unknown.length === 0, 'invalid_operation', `pick_up_ground_items does not accept ${unknown.join(', ')}; arguments are ${PICKUP_ARGUMENTS.join(', ')}`)
+  for (const key of ['x', 'y']) check(typeof args[key] === 'number' && Number.isFinite(args[key]) && Math.abs(args[key]) <= MAX_LINE_COORDINATE, 'invalid_operation', `${key} must be a finite map coordinate`)
+  const radius = args.radius ?? 0
+  check(Number.isSafeInteger(radius) && radius >= 0 && radius <= MAX_PICKUP_RADIUS, 'operation_limit', `radius is bounded to 0-${MAX_PICKUP_RADIUS}`)
+  return { name: 'pick_up_ground_items', args: { x: args.x, y: args.y, radius } }
+}
+
 export function parseExternalOperation(raw) {
+  if (raw?.name === 'place_line') return parseLineOperation(raw)
+  if (raw?.name === 'pick_up_ground_items') return parsePickupOperation(raw)
   const operation = parseOperation(['harvest_product', 'gather_resource'].includes(raw?.name) && raw.args?.search_radius === undefined
     ? { ...raw, args: { ...raw.args, search_radius: raw.name === 'harvest_product' ? 64 : 128 } } : raw)
   check(OPERATION_NAMES.includes(operation.name), 'operation_not_supported', 'This external mode does not enable that operation')
@@ -312,6 +465,10 @@ export class NativeBridge {
     let result
     try { result = JSON.parse(raw.trim()) }
     catch { return { text: raw } }
+    if (name === 'getResourceAmounts' && object(result)) {
+      // Factorio serializes an empty Lua table as {}; these fields are lists (trial 4r: an empty area returned tiles {}).
+      for (const key of ['resources', 'tiles', 'unseen_chunks']) if (Object.hasOwn(result, key)) result[key] = array(result[key])
+    }
     return name === 'getPlacementCandidates' ? this.annotateCandidates(result) : result
   }
 
@@ -360,7 +517,7 @@ export class NativeBridge {
     const result = network?.provable === false
       ? { ...native, candidates: native.candidates.map(candidate => ({ ...candidate, external_preservation: { eligible: false, code: prototypeName(network.reason) } })) }
       : native
-    const rule = 'Footprint rule: non-resource entities in the footprint (items on the ground, characters) block external placement, which never clears them. Fluid joins: external_preservation.eligible=false when connects_to.preservation_network is not provable. Other preflight checks still apply.'
+    const rule = 'Footprint rule: items on the ground, characters and entities whose collision layers overlap the placed entity block external placement, which never clears them; non-colliding entities such as tree stumps do not. Fluid joins: external_preservation.eligible=false when connects_to.preservation_network is not provable. Other preflight checks still apply. covers_resources lists the resource tiles under a footprint by name (one resource entity per tile); it is a fact, not a refusal.'
     const rows = result.candidates.slice(0, ANNOTATED_CANDIDATES)
     const boxes = rows.map(row => row?.footprint?.world_box)
     if (!boxes.every(box => [box?.left_top?.x, box?.left_top?.y, box?.right_bottom?.x, box?.right_bottom?.y].every(Number.isFinite))) {
@@ -369,7 +526,7 @@ export class NativeBridge {
     const literal = boxes.map(box => `{{${box.left_top.x},${box.left_top.y}},{${box.right_bottom.x},${box.right_bottom.y}}}`).join(',')
     let checked
     try {
-      checked = json(await this.rcon.command(`${JSON_PREFIX}(function() ${FOOTPRINT_RULE_LUA} local a=remote.call("sgluna_deployment","status"); local surface=game.surfaces[a.surface_index]; if not surface then return {ok=false} end; local out={}; for i,box in ipairs({${literal}}) do local code,blockers=external_footprint(surface,box); out[i]={code=code or "clear",blockers=blockers} end; return {ok=true,tick=game.tick,rows=out} end)()))`))
+      checked = json(await this.rcon.command(`${JSON_PREFIX}(function() ${FOOTPRINT_RULE_LUA} local a=remote.call("sgluna_deployment","status"); local surface=game.surfaces[a.surface_index]; if not surface then return {ok=false} end; local out={}; for i,box in ipairs({${literal}}) do local code,blockers=external_footprint(surface,box,nil,${typeof native.entity_name === 'string' && /^[a-z0-9][a-z0-9-]{0,99}$/.test(native.entity_name) ? luaString(native.entity_name) : 'nil'}); local res,seen={},{}; for _,r in pairs(surface.find_entities_filtered{area=box,type="resource",limit=256}) do local p=r.valid and r.position; if p and p.x>box[1][1] and p.x<box[2][1] and p.y>box[1][2] and p.y<box[2][2] then local k=seen[r.name]; if not k then k=#res+1; seen[r.name]=k; res[k]={name=r.name,tiles=0} end; res[k].tiles=res[k].tiles+1 end end; out[i]={code=code or "clear",blockers=blockers,resources=res} end; return {ok=true,tick=game.tick,rows=out} end)()))`))
     }
     catch { checked = undefined }
     if (checked?.ok !== true || !Array.isArray(checked.rows) || checked.rows.length !== rows.length) {
@@ -378,8 +535,10 @@ export class NativeBridge {
     const candidates = result.candidates.map((candidate, index) => {
       if (index >= rows.length) return { ...candidate, external_footprint: { checked: false } }
       const code = checked.rows[index]?.code
-      if (code === 'clear') return { ...candidate, external_footprint: { eligible: true } }
-      return { ...candidate, external_footprint: { eligible: false, code: prototypeName(code), blockers: footprintBlockers(checked.rows[index]?.blockers) } }
+      const covered = resourceCoverage(checked.rows[index]?.resources)
+      const annotated = covered.length > 0 ? { ...candidate, covers_resources: covered } : candidate
+      if (code === 'clear') return { ...annotated, external_footprint: { eligible: true } }
+      return { ...annotated, external_footprint: { eligible: false, code: prototypeName(code), blockers: footprintBlockers(checked.rows[index]?.blockers) } }
     })
     const blocked = candidates.filter(candidate => candidate.external_footprint.eligible === false || candidate.external_preservation).length
     return { ...result, candidates, external_placement: { rule, checked: true, tick: checked.tick,
@@ -401,6 +560,22 @@ export class NativeBridge {
       check(snapshot.high_water < Number.MAX_SAFE_INTEGER - 1, 'native_ordinal_exhausted')
       if (['place_entity', 'place_candidate'].includes(operation.name)) check(snapshot.status.placement_no_clear_supported === true, 'placement_safety_capability_missing')
       if (operation.name === 'place_candidate') check(snapshot.status.external_fluid_candidates_supported === 1, 'fluid_safety_capability_missing')
+      if (operation.name === 'place_line') {
+        check(snapshot.status.placement_no_clear_supported === true && snapshot.status.external_line_placement_supported === 1, 'line_placement_capability_missing')
+        const position = snapshot.actor.position
+        check(Number.isFinite(position?.x) && Number.isFinite(position?.y), 'operation_limit', 'every line tile must be within 128 tiles of the current actor, whose position is unavailable')
+        const far = lineTiles(operation.args).map(tile => ({ ...tile, distance: Math.hypot(tile.x - position.x, tile.y - position.y) })).find(tile => tile.distance > 128)
+        if (far) check(false, 'operation_limit', `Line tile ${far.index} at (${far.x}, ${far.y}) is ${far.distance.toFixed(1)} tiles from the actor at (${position.x}, ${position.y}); every tile must be within 128. The operation was not sent to the game.`,
+          { details: { limit: 'walk_distance', maximum: 128, tile_index: far.index, distance: Math.round(far.distance * 10) / 10, actor_position: { x: position.x, y: position.y } } })
+      }
+      if (operation.name === 'pick_up_ground_items') {
+        check(snapshot.status.external_ground_pickup_supported === 1, 'ground_pickup_capability_missing')
+        const position = snapshot.actor.position
+        check(Number.isFinite(position?.x) && Number.isFinite(position?.y), 'operation_limit', 'the pickup box must be within 128 tiles of the current actor, whose position is unavailable')
+        const distance = Math.hypot(operation.args.x - position.x, operation.args.y - position.y)
+        check(distance <= 128, 'operation_limit', `The pickup box is ${distance.toFixed(1)} tiles from the actor at (${position.x}, ${position.y}); the limit is 128. The operation was not sent to the game.`,
+          { details: { limit: 'walk_distance', maximum: 128, distance: Math.round(distance * 10) / 10, actor_position: { x: position.x, y: position.y } } })
+      }
       if (operation.name === 'walk_to_position') {
         const position = snapshot.actor.position
         check(Number.isFinite(position?.x) && Number.isFinite(position?.y), 'operation_limit', 'walk target must be within 128 tiles of the current actor, whose position is unavailable')
@@ -437,15 +612,16 @@ export class NativeBridge {
       preservation = { version: 2, operation_key: key, attempt_id: pending.attempt_id, ordinal: pending.ordinal,
         signature: pending.signature, owner, candidate: frozen.preservation_join }
     }
-    return { operation, pending, preflight, ...(preservation ? { preservation } : {}), observed_before: await this.effectProbe(operation) }
+    return { operation, pending, preflight, ...(preservation ? { preservation } : {}), observed_before: await this.effectProbe(operation, (Array.isArray(preflight?.items) ? preflight.items : []).map(item => item?.name)) }
   }
 
   // Read-only actor position and relevant inventory counts, for a labelled
   // before/after comparison on terminal receipts. Failure yields null; it never
   // blocks or fails an operation.
-  async effectProbe(operation) {
+  // found: the item names a pick_up_ground_items preflight listed (the runtime passes the names in observed_before back).
+  async effectProbe(operation, found) {
     try {
-      const items = effectItems(operation)
+      const items = effectItems(operation, found)
       const raw = json(await this.rcon.command(`${PREFIX}local g=remote.call("sgluna_deployment","status"); local e=g.actor_id and game.get_entity_by_unit_number(g.actor_id); if not e or not e.valid or e.type~="character" then rcon.print(helpers.table_to_json({ok=false})) else local counts={}; for _,n in pairs({${items.map(luaString).join(',')}}) do local ok,c=pcall(e.get_item_count,n); if ok then counts[n]=c end end; rcon.print(helpers.table_to_json({ok=true,tick=game.tick,actor_id=g.actor_id,position=e.position,items=counts})) end`))
       if (raw?.ok !== true || !Number.isSafeInteger(raw.tick) || !Number.isFinite(raw.position?.x) || !Number.isFinite(raw.position?.y)) return null
       const counts = {}
@@ -467,9 +643,13 @@ export class NativeBridge {
     const session = luaString(this.session)
     const walkGate = operation.name === 'walk_to_position'
       ? `local p=s.actor and s.actor.position; if not p or (p.x-(${operation.args.x}))^2+(p.y-(${operation.args.y}))^2>16384 then return "walk_out_of_range" end; ` : ''
-    const placementGate = ['place_entity', 'place_candidate'].includes(operation.name) ? `if s.placement_no_clear_supported~=true then return "placement_safety_capability_missing" end; ${operation.name === 'place_candidate' ? 'if s.external_fluid_candidates_supported~=1 then return "fluid_safety_capability_missing" end; ' : ''}` : ''
+    const pickupGate = operation.name === 'pick_up_ground_items'
+      ? `if s.external_ground_pickup_supported~=1 then return "ground_pickup_capability_missing" end; local p=s.actor and s.actor.position; if not p or (p.x-(${operation.args.x}))^2+(p.y-(${operation.args.y}))^2>16384 then return "walk_out_of_range" end; ` : ''
+    const lineGate = operation.name === 'place_line'
+      ? `local p=s.actor and s.actor.position; if not p then return "walk_out_of_range" end; for _,t in ipairs({${lineTiles(operation.args).map(tile => `{${tile.x},${tile.y}}`).join(',')}}) do if (p.x-(t[1]))^2+(p.y-(t[2]))^2>16384 then return "walk_out_of_range" end end; ` : ''
+    const placementGate = ['place_entity', 'place_candidate', 'place_line'].includes(operation.name) ? `if s.placement_no_clear_supported~=true then return "placement_safety_capability_missing" end; ${operation.name === 'place_candidate' ? 'if s.external_fluid_candidates_supported~=1 then return "fluid_safety_capability_missing" end; ' : ''}${operation.name === 'place_line' ? 'if s.external_line_placement_supported~=1 then return "line_placement_capability_missing" end; ' : ''}` : ''
     if (operation.name === 'place_candidate') check(prepared.preservation?.candidate?.owner?.session === this.session, 'fluid_preservation_required')
-    const gate = `local g=remote.call("sgluna_deployment","status"); if g.session~=${session} or g.allowed~=true or g.actor_id~=${pending.actor.actor_id} or g.epoch~=${pending.actor.epoch} then return "session_or_actor_changed" end; if game.speed~=1 then return "nonstandard_game_speed" end; local s=remote.call("autorio_operations","status"); if s.task_state~="idle" or s.queue_length~=0 or s.active_batch then return "native_busy" end; if s.batch_generation~=${pending.baseline.generation} then return "native_generation_changed" end; ${walkGate}${placementGate}local j=remote.call("autorio_operation_admission","status"); if j.high_water~=${pending.ordinal - 1} then return "ordinal_not_fresh" end; for _,r in pairs(j.records) do if r.state=="admitting" or r.state=="admitted" or r.state=="uncertain" then return "unresolved_native_operation" end end; local p=${preflightExpression(operation)}; if p.ok~=true then return "preflight_rejected" end; return nil`
+    const gate = `local g=remote.call("sgluna_deployment","status"); if g.session~=${session} or g.allowed~=true or g.actor_id~=${pending.actor.actor_id} or g.epoch~=${pending.actor.epoch} then return "session_or_actor_changed" end; if game.speed~=1 then return "nonstandard_game_speed" end; local s=remote.call("autorio_operations","status"); if s.task_state~="idle" or s.queue_length~=0 or s.active_batch then return "native_busy" end; if s.batch_generation~=${pending.baseline.generation} then return "native_generation_changed" end; ${walkGate}${lineGate}${pickupGate}${placementGate}local j=remote.call("autorio_operation_admission","status"); if j.high_water~=${pending.ordinal - 1} then return "ordinal_not_fresh" end; for _,r in pairs(j.records) do if r.state=="admitting" or r.state=="admitted" or r.state=="uncertain" then return "unresolved_native_operation" end end; local p=${preflightExpression(operation)}; if p.ok~=true then return "preflight_rejected"..${REFUSAL_DETAIL_LUA}(p) end; return nil`
     const guardedRcon = { command: async command => {
       check(command.startsWith(PREFIX), 'batch_renderer_changed')
       return this.rcon.command(`${PREFIX}local refusal=(function() ${gate} end)(); if refusal then rcon.print(${luaString(ack)}..helpers.table_to_json({ok=false,result="external_guard_refused:"..refusal,prefix={}})) else ${command.slice(PREFIX.length)} end`)
@@ -479,10 +659,12 @@ export class NativeBridge {
       return { admitted: true, admission: result.admission }
     }
     catch (error) {
-      if (/^external_guard_refused:(?:session_or_actor_changed|nonstandard_game_speed|native_busy|ordinal_not_fresh|unresolved_native_operation|preflight_rejected|walk_out_of_range|placement_safety_capability_missing|fluid_safety_capability_missing|native_generation_changed)$/.test(error.factorioError ?? '')
-        && !error.admission && (Array.isArray(error.results) ? error.results.length === 0 : object(error.results) && Object.keys(error.results).length === 0)) {
+      const refusal = parseGuardRefusal(error.factorioError)
+      if (refusal && !error.admission && (Array.isArray(error.results) ? error.results.length === 0 : object(error.results) && Object.keys(error.results).length === 0)) {
         error.notAdmitted = true
-        error.code = error.factorioError.slice('external_guard_refused:'.length)
+        error.code = refusal.code
+        // The atomic re-run of the preflight refused: name its native cause, as a prepare-time refusal does.
+        if (refusal.details) error.details = refusal.details
       }
       throw error
     }
@@ -496,13 +678,55 @@ export class NativeBridge {
     const refs = admission?.slots.flatMap(slot => slot.batch_refs) ?? []
     const receipts = snapshot.status.receipt_journal.filter(receipt => refs.some(ref => ref.batch_ref === receipt.batch_ref
       && ref.batch_id === receipt.batch_id && ref.batch_generation === receipt.batch_generation))
-    return { ...disposition(reconciliation), owned: snapshot.owned, high_water: snapshot.high_water,
-      requires_reconciliation: ['cancelled', 'partial', 'uncertain'].includes(disposition(reconciliation).state),
+    let state = disposition(reconciliation)
+    let line
+    if (pending.operations?.[0]?.name === 'place_line') {
+      line = await this.lineEvidence(reconciliation, refs, pending.operations[0].identity)
+      // A line counts as completed only when the native record of exactly this request lists every tile as placed.
+      const whole = line && line.refusal === null && line.placed_count === line.count && line.placed.every((entity, index) => entity.index === index && Number.isSafeInteger(entity.unit_number))
+      if (state.state === 'completed' && !whole) {
+        state = { ...state, state: 'uncertain', reason: 'line_receipt_incomplete', terminal: false, execution_completed: false }
+      }
+    }
+    // The last basic result is not assumed correlated: only a result whose placed batch identity is exactly this
+    // admission's is included. A later operation overwrites it, so it may be absent; absence never fails a receipt.
+    const last = snapshot.status.basic_operation?.last_result
+    const correlated = object(last) && typeof last.placed_batch_ref === 'string' && refs.some(ref => ref.batch_ref === last.placed_batch_ref
+      && ref.batch_id === last.placed_batch_id && ref.batch_generation === last.placed_batch_generation) ? last : undefined
+    const placed = correlated?.completed === true && Number.isSafeInteger(correlated.placed_unit_number)
+      ? { unit_number: correlated.placed_unit_number, entity_name: gameName(correlated.entity_name), entity_type: prototypeName(correlated.placed_entity_type),
+        ...(Number.isFinite(correlated.placed_position?.x) && Number.isFinite(correlated.placed_position?.y) ? { position: { x: correlated.placed_position.x, y: correlated.placed_position.y } } : {}),
+        ...(Number.isSafeInteger(correlated.placed_direction) ? { direction: correlated.placed_direction } : {}), source: 'native_placement_result' }
+      : undefined
+    return { ...state, owned: snapshot.owned, high_water: snapshot.high_water,
+      requires_reconciliation: ['cancelled', 'partial', 'uncertain'].includes(state.state),
+      ...(line !== undefined ? { line_placement: line } : {}),
+      ...(placed !== undefined ? { placed_entity: placed } : {}),
       evidence: { admission: admission ?? null, receipts, tick: snapshot.tick,
-        // The last basic result is not assumed correlated. Its batch identity is
-        // checked below before inclusion; absent/legacy evidence stays absent.
-        ...(snapshot.status.basic_operation?.batch_ref && refs.some(ref => ref.batch_ref === snapshot.status.basic_operation.batch_ref)
-          ? { basic_operation: snapshot.status.basic_operation } : {}) } }
+        ...(correlated ? { basic_operation: correlated } : {}) } }
+  }
+
+  // Read-only native line record for this admission's single batch. Returns
+  // null when it is unavailable; never treated as completion on its own.
+  async lineEvidence(reconciliation, refs, requestIdentity) {
+    const ref = refs.length === 1 ? refs[0] : undefined
+    if (!ref || typeof ref.batch_ref !== 'string') return null
+    let raw
+    try { raw = json(await this.rcon.command(`${JSON_PREFIX}remote.call("autorio_operations","line_placement_status",${luaString(ref.batch_ref)})))`)) }
+    catch { return null }
+    const line = raw?.ok === true ? raw.line : undefined
+    if (!object(line) || line.batch_ref !== ref.batch_ref || line.batch_id !== ref.batch_id || line.batch_generation !== ref.batch_generation) return null
+    // The pending ledger keeps only the request's identity digest; the native record must reproduce it from its own arguments.
+    const recorded = { name: 'place_line', args: { entity_name: line.entity_name, x: line.origin?.x, y: line.origin?.y, direction: line.direction,
+      line_direction: line.line_direction, count: line.count, spacing: line.spacing } }
+    if (typeof requestIdentity !== 'string' || operationIdentity(recorded) !== requestIdentity) return null
+    const point = p => ({ x: p?.x, y: p?.y })
+    const placed = (Array.isArray(line.placed) ? line.placed : []).slice(0, MAX_LINE_PLACEMENTS).map(entity => ({
+      index: entity.index, unit_number: entity.unit_number, position: point(entity.position), direction: entity.direction }))
+    const refusal = object(line.refusal) ? { index: line.refusal.index, code: prototypeName(line.refusal.code),
+      ...(Array.isArray(line.refusal.blockers) ? { blockers: footprintBlockers(line.refusal.blockers) } : {}) } : null
+    return { line_id: line.line_id, entity_name: line.entity_name, count: line.count, placed, placed_count: placed.length,
+      refusal, source: reconciliation?.verdict === 'admitted_partial' ? 'native_line_record_sealed_partial' : 'native_line_record' }
   }
 
   async cancel(pending) {

@@ -1,5 +1,5 @@
 {
-  "schema": 2,
+  "schema": 3,
   "profile": "leveled",
   "default_enabled": false,
   "description": "Optional knowledge and skill methods. No recipes or ratios. Current tool availability and live facts remain mandatory.",
@@ -353,12 +353,7 @@
       "reference": {
         "concepts": [
           "The checkpoints run in order from manual bootstrap through burner loops, centralized electricity, electric mining and transfers and separated smelting to sustained downstream consumption; each builds on the earlier ones.",
-          "Manual bootstrap: the agent hand-places and primes machines; priming is finite and declared.",
-          "Self-sustaining burner loops: burner mining or smelting whose fuel is delivered by the system rather than by agent fuel runs.",
-          "Centralized electricity: a power network whose fuel or service supply arrives automatically.",
-          "Electric mining and transfers: electric miners and electric transfers on that network, where live availability and tool support allow.",
-          "Separated smelting arrays: automatic feed, output and, if the machines need it, fuel service.",
-          "Sustained downstream consumption: science or labs running from the earlier checkpoints without agent intervention.",
+          "Each checkpoint has its own stage record in the knowledge stage category, from stage-manual-bootstrap to stage-sustained-consumption, saying what the stage is, what evidence reaches it and which methods serve it.",
           "Place the base at the highest checkpoint whose evidence holds over a fresh window and name the first checkpoint that lacks it.",
           "Contrast: a burner design is a stage on the scale, not a substitute for a checkpoint that tool support does not yet reach."
         ],
@@ -394,6 +389,133 @@
         "Prefilled stocks or a short positive run are classified as sustained.",
         "Repeated individual refueling is counted as automation.",
         "Unlocks or tool support are assumed from catalog presence."
+      ],
+      "source": {
+        "kind": "manual",
+        "entity_unit_numbers": [],
+        "recipe_ids": [],
+        "evidence_refs": [
+          "curated:factorio-leveled-v1; owner-approved-method-catalog; native-mastery-unverified"
+        ]
+      }
+    },
+    {
+      "schema_version": 1,
+      "content_type": "knowledge",
+      "id": "knowledge-owner-expandable-base",
+      "revision": 1,
+      "name": "Keep the Base Expandable",
+      "summary": "Build so the next step can grow: keep ore patches minable, leave room to extend lines and choose a layout style deliberately. A main bus is one option, not the rule.",
+      "level": 2,
+      "search_aliases": [
+        "expandable",
+        "expansion",
+        "base layout",
+        "main bus",
+        "ore patch",
+        "build on ore",
+        "room to grow",
+        "future extraction",
+        "scale up",
+        "spaghetti",
+        "layout planning",
+        "base design"
+      ],
+      "applicability": {
+        "when_to_use": "Choosing where and how to place production that will stay, or judging whether a finished base can grow to the next goal.",
+        "when_to_skip": "A declared temporary bootstrap, such as direct drill-to-furnace smelting at the start, that will be replaced; record it as temporary instead.",
+        "live_checks": [
+          "getPlacementCandidates marks candidates whose footprint covers resource tiles (covers_resources); decide deliberately whether a building belongs there.",
+          "getResourceAmounts for the patch extent before choosing where permanent smelting, power and assembly go.",
+          "getResearchStatus.available for unlocks that change the layout options."
+        ],
+        "required_capabilities": []
+      },
+      "reference": {
+        "concepts": [
+          "Expandability takes judgement: plan the next growth step, not only the current one. There is no single correct layout.",
+          "Ore patches are for extraction. Drills and the belts that carry ore off the patch belong on it, and temporary direct smelting at the start is fine. A permanent furnace, assembler, power or storage building on the patch takes tiles that later drills could use; place it there only deliberately.",
+          "Leave space where a line will grow: past the end of a smelting row, beside an output belt, along a pole line. A line boxed in at both ends cannot be extended without rebuilding.",
+          "A main bus is one well-known way to keep growth simple. Separated arrays, modular cells or a compact starter that is later replaced are also valid; pick one and keep to it.",
+          "Prefer the purpose-built entity once it is unlocked, such as a splitter to divide a belt or an underground belt to cross one, over an improvised substitute that blocks later changes.",
+          "Contrast: a compact starter that is declared temporary and later replaced is a valid choice; an unplanned layout that happens to block the next growth step is not."
+        ],
+        "interpretation_checks": [
+          "Before calling a base expandable, name where the next copy of each line would go and check that the space is still free."
+        ]
+      },
+      "related_ids": [
+        "knowledge-owner-tech-unlock-awareness",
+        "knowledge-automation-progression-checkpoints",
+        "knowledge-connection-geometry",
+        "scale-out-production-line",
+        "skill-define-production-interfaces",
+        "skill-check-unlocks-before-improvising"
+      ],
+      "known_failure_modes": [
+        "Permanent furnaces, power or assemblers on the ore patch take the tiles the next goal needs for drills.",
+        "A line built against an obstacle at both ends cannot be extended without rebuilding.",
+        "Treating one layout style, such as a main bus, as the only correct way to build."
+      ],
+      "source": {
+        "kind": "manual",
+        "entity_unit_numbers": [],
+        "recipe_ids": [],
+        "evidence_refs": [
+          "curated:factorio-leveled-v1; owner-approved-method-catalog; native-mastery-unverified"
+        ]
+      }
+    },
+    {
+      "schema_version": 1,
+      "content_type": "knowledge",
+      "id": "knowledge-owner-tech-unlock-awareness",
+      "revision": 1,
+      "name": "Watch for Tech Unlocks",
+      "summary": "Before improvising around a missing building, check what research would unlock it. Keep labs busy with research that opens better layout options.",
+      "level": 1,
+      "search_aliases": [
+        "tech unlock",
+        "research unlock",
+        "splitter",
+        "underground belt",
+        "logistics research",
+        "what to research",
+        "research order",
+        "improvise",
+        "workaround",
+        "labs idle"
+      ],
+      "applicability": {
+        "when_to_use": "Planning the next phase, choosing research, or about to build a workaround for a function a dedicated entity would do: splitting, crossing, buffering or longer reach.",
+        "when_to_skip": "A one-off temporary build that will be replaced before the unlock would arrive.",
+        "live_checks": [
+          "getResearchStatus.available lists the technologies researchable now with the recipes each unlocks; getTechnology lists unlocks, cost and prerequisites for any technology.",
+          "getRecipeDetails tells whether a recipe is enabled now."
+        ],
+        "required_capabilities": []
+      },
+      "reference": {
+        "concepts": [
+          "Many layout problems have a purpose-built answer behind early research. Check unlocks before choosing a workaround: an inserter between two belts is a weak splitter, and a belt routed around a line is a weak underground.",
+          "Research is cheap compared with rebuilding. Queue the next useful technology before the current one finishes so labs never idle.",
+          "An unlock changes what is possible, not what is required. Use the dedicated entity when it serves the plan; a temporary workaround is fine when it is declared temporary.",
+          "Contrast: an available unlock is not by itself a reason to research it; choose research for what the plan needs next."
+        ],
+        "interpretation_checks": [
+          "When a plan contains a workaround, the technology that would replace it is named with whether it is available now."
+        ]
+      },
+      "related_ids": [
+        "knowledge-owner-expandable-base",
+        "knowledge-available-capabilities",
+        "knowledge-acquisition-paths",
+        "skill-check-unlocks-before-improvising",
+        "skill-trigger-aware-progression"
+      ],
+      "known_failure_modes": [
+        "Splitting a belt with an inserter instead of researching the splitter.",
+        "Labs idle while the plan waits on a building that needs research."
       ],
       "source": {
         "kind": "manual",
@@ -1495,6 +1617,421 @@
       "known_failure_modes": [
         "Installed machine count is reported as production capacity.",
         "Expansion consumes the supply needed to keep the original cell working."
+      ],
+      "confidence": {
+        "level": "low",
+        "basis": [
+          "Authored decision procedure; use requires live applicability and supported tools. Difficulty is independent of evidence. No autonomous gameplay capability is established."
+        ]
+      },
+      "examples": []
+    },
+    {
+      "schema_version": 1,
+      "revision": 1,
+      "id": "skill-check-unlocks-before-improvising",
+      "name": "Check Unlocks Before Improvising",
+      "content_type": "skill",
+      "level": 1,
+      "kind": "utility",
+      "stage": "pattern",
+      "status": "candidate",
+      "summary": "About to build a workaround for splitting, crossing or buffering? Check whether a researchable technology unlocks the purpose-built entity, and queue it when it serves the plan.",
+      "goal_tags": [
+        "research",
+        "unlock",
+        "layout",
+        "splitter",
+        "underground",
+        "expansion"
+      ],
+      "source": {
+        "kind": "manual",
+        "entity_unit_numbers": [],
+        "recipe_ids": [],
+        "evidence_refs": [
+          "curated:factorio-leveled-v1; owner-approved-method-catalog; native-mastery-unverified"
+        ]
+      },
+      "preconditions": [
+        {
+          "kind": "custom",
+          "subject": "live-applicability",
+          "description": "Check live capability, current goal, actor/surface and tool availability; an entry does not grant execution or plan authority."
+        }
+      ],
+      "inputs": [],
+      "outputs": [],
+      "topology": {
+        "nodes": [],
+        "relations": []
+      },
+      "constraints": [
+        {
+          "kind": "safety",
+          "description": "No stored recipes or ratios. Use fresh live tools. Preserve native mechanics, owner structures, committed semantics, reservations and harness recovery limits. Reconcile uncertain effects before further mutation.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        }
+      ],
+      "parameters": [],
+      "guidance": {
+        "when_to_use": "A plan step needs a function, such as dividing a belt, crossing a belt, reaching further or buffering, that the currently enabled entities do only poorly.",
+        "when_to_skip": "The workaround is declared temporary and will be replaced before the research would finish.",
+        "live_checks": [
+          "getResearchStatus.available and getTechnology unlocks for an entity that does the function directly.",
+          "getRecipeDetails for whether that entity is already enabled.",
+          "Current research queue and lab supply."
+        ],
+        "steps": [
+          "Name the function the step needs, not the workaround.",
+          "Look for a technology in getResearchStatus.available, or its nearest prerequisite chain, whose unlocks include an entity for that function.",
+          "If the research is affordable, queue it and plan the step around the unlocked entity; build only what is needed meanwhile.",
+          "If you still build a workaround, record it as temporary and what replaces it."
+        ],
+        "completion": [
+          "The step uses the purpose-built entity, or the workaround is declared temporary with its replacement named."
+        ],
+        "required_capabilities": [],
+        "related_ids": [
+          "knowledge-owner-tech-unlock-awareness",
+          "knowledge-owner-expandable-base"
+        ]
+      },
+      "verification": {
+        "structural": "not_tested",
+        "recipe_flow": "not_tested",
+        "placement_rebuild": "not_tested",
+        "production_output": "not_tested",
+        "belt_capacity": "unvalidated",
+        "inserter_sustained_throughput": "unvalidated",
+        "acceptance_conditions": []
+      },
+      "known_failure_modes": [
+        "Building a permanent workaround while the unlock is one cheap research away.",
+        "Delaying a small goal for research it does not need."
+      ],
+      "confidence": {
+        "level": "low",
+        "basis": [
+          "Authored decision procedure; use requires live applicability and supported tools. Difficulty is independent of evidence. No autonomous gameplay capability is established."
+        ]
+      },
+      "examples": []
+    },
+    {
+      "schema_version": 1,
+      "revision": 1,
+      "id": "skill-size-array-to-transport",
+      "name": "Size an Array to Its Transport",
+      "content_type": "skill",
+      "level": 2,
+      "kind": "utility",
+      "stage": "pattern",
+      "status": "candidate",
+      "summary": "Size a smelting or production array by the transport it fills: derive machine and miner counts for one lane or one belt from live rates, commission one cell, then copy.",
+      "search_aliases": [
+        "smelting array",
+        "furnace array",
+        "furnace column",
+        "full belt",
+        "full lane",
+        "belt throughput",
+        "array size",
+        "how many furnaces"
+      ],
+      "goal_tags": [
+        "array",
+        "smelting",
+        "belt",
+        "lane",
+        "throughput",
+        "scale"
+      ],
+      "source": {
+        "kind": "manual",
+        "entity_unit_numbers": [],
+        "recipe_ids": [],
+        "evidence_refs": [
+          "curated:factorio-leveled-v1; owner-approved-method-catalog; native-mastery-unverified"
+        ]
+      },
+      "preconditions": [
+        {
+          "kind": "custom",
+          "subject": "live-applicability",
+          "description": "Check live capability, current goal, actor/surface and tool availability; an entry does not grant execution or plan authority."
+        }
+      ],
+      "inputs": [],
+      "outputs": [],
+      "topology": {
+        "nodes": [],
+        "relations": []
+      },
+      "constraints": [
+        {
+          "kind": "safety",
+          "description": "No stored recipes or ratios. Use fresh live tools. Preserve native mechanics, owner structures, committed semantics, reservations and harness recovery limits. Reconcile uncertain effects before further mutation.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        }
+      ],
+      "parameters": [],
+      "guidance": {
+        "when_to_use": "Building or extending an array whose output should fill a belt lane or a whole belt.",
+        "when_to_skip": "The demand is well below one lane and a row sized to that demand is enough.",
+        "live_checks": [
+          "getTransportCapacity for the per-lane and per-belt rate of the belt tier in use.",
+          "getRecipeDetails and getPrototypeDetails for the recipe time and the machine crafting speed; getMiningDetails for miner output on this resource.",
+          "solveProduction for the machine count of a target rate, when it supports the target."
+        ],
+        "steps": [
+          "Choose the transport unit the array fills: one lane or a whole belt of the output.",
+          "Derive the machine count from live values: the transport rate divided by one machine's output rate. Size the input supply, such as miners, from the input rate the machines consume.",
+          "Feed every machine from one input belt with lanes assigned on purpose; when the machines burn fuel, carry fuel on its own lane.",
+          "Collect output onto a lane or belt of the chosen capacity.",
+          "Commission one cell and measure it before copying it along the line.",
+          "Measure array output while downstream accepts it. A backed-up output belt shows missing demand, not missing capacity."
+        ],
+        "completion": [
+          "Measured array output approaches the chosen transport unit, or the limiting input is named with evidence."
+        ],
+        "required_capabilities": [],
+        "related_ids": [
+          "starter-smelting-row",
+          "scale-out-production-line",
+          "two-item-half-belt",
+          "skill-commission-before-copying",
+          "skill-find-actual-bottleneck",
+          "knowledge-rates-stocks-freshness",
+          "knowledge-owner-expandable-base"
+        ]
+      },
+      "verification": {
+        "structural": "not_tested",
+        "recipe_flow": "not_tested",
+        "placement_rebuild": "not_tested",
+        "production_output": "not_tested",
+        "belt_capacity": "unvalidated",
+        "inserter_sustained_throughput": "unvalidated",
+        "acceptance_conditions": []
+      },
+      "known_failure_modes": [
+        "The machine count is guessed instead of derived from live rates.",
+        "Input supply is sized below what the machines consume, so the end of the array idles.",
+        "Capacity is judged while the output belt is backed up."
+      ],
+      "confidence": {
+        "level": "low",
+        "basis": [
+          "Authored decision procedure; use requires live applicability and supported tools. Difficulty is independent of evidence. No autonomous gameplay capability is established."
+        ]
+      },
+      "examples": []
+    },
+    {
+      "schema_version": 1,
+      "revision": 1,
+      "id": "skill-size-research-to-supply",
+      "name": "Plan Research and Size Labs",
+      "content_type": "skill",
+      "level": 2,
+      "kind": "utility",
+      "stage": "pattern",
+      "status": "candidate",
+      "summary": "Plan the research path to the unlocks the goal needs, size labs to the measured science supply, and keep the queue ahead of the labs.",
+      "search_aliases": [
+        "how many labs",
+        "lab count",
+        "research queue",
+        "science supply",
+        "research plan",
+        "tech tree",
+        "labs idle"
+      ],
+      "goal_tags": [
+        "research",
+        "labs",
+        "science",
+        "queue",
+        "unlock"
+      ],
+      "source": {
+        "kind": "manual",
+        "entity_unit_numbers": [],
+        "recipe_ids": [],
+        "evidence_refs": [
+          "curated:factorio-leveled-v1; owner-approved-method-catalog; native-mastery-unverified"
+        ]
+      },
+      "preconditions": [
+        {
+          "kind": "custom",
+          "subject": "live-applicability",
+          "description": "Check live capability, current goal, actor/surface and tool availability; an entry does not grant execution or plan authority."
+        }
+      ],
+      "inputs": [],
+      "outputs": [],
+      "topology": {
+        "nodes": [],
+        "relations": []
+      },
+      "constraints": [
+        {
+          "kind": "safety",
+          "description": "No stored recipes or ratios. Use fresh live tools. Preserve native mechanics, owner structures, committed semantics, reservations and harness recovery limits. Reconcile uncertain effects before further mutation.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        }
+      ],
+      "parameters": [],
+      "guidance": {
+        "when_to_use": "Choosing a research sequence toward an unlock, or deciding how many labs the science supply can keep busy.",
+        "when_to_skip": "One cheap technology is queued and the existing labs and supply already cover it.",
+        "live_checks": [
+          "getResearchPath for the prerequisite chain of the target technology.",
+          "getTechnology for each technology's unit count, unit time and pack types; getResearchStatus for the queue, progress and what is available now.",
+          "getPrototypeDetails for lab research speed; measured pack output from the science machines."
+        ],
+        "steps": [
+          "Name the unlocks the goal needs and read the full prerequisite path; total the packs of each type it consumes.",
+          "Size labs from live values: the measured pack rate times the unit time, divided by lab research speed. Labs beyond what supply can feed only idle.",
+          "Deliver every pack type the current technology needs to every lab.",
+          "Queue the next technology before the current one finishes, and keep enough queued to cover any hands-off period.",
+          "Recheck the lab count when unit time or pack types change between technologies."
+        ],
+        "completion": [
+          "The queue covers the goal's unlocks, lab count matches measured supply, and labs are not idle for missing packs or an empty queue."
+        ],
+        "required_capabilities": [],
+        "related_ids": [
+          "knowledge-owner-tech-unlock-awareness",
+          "skill-check-unlocks-before-improvising",
+          "skill-trigger-aware-progression",
+          "skill-prove-sustainment",
+          "knowledge-production-dependencies"
+        ]
+      },
+      "verification": {
+        "structural": "not_tested",
+        "recipe_flow": "not_tested",
+        "placement_rebuild": "not_tested",
+        "production_output": "not_tested",
+        "belt_capacity": "unvalidated",
+        "inserter_sustained_throughput": "unvalidated",
+        "acceptance_conditions": []
+      },
+      "known_failure_modes": [
+        "Labs built before science supply exists.",
+        "The queue empties during a hands-off period.",
+        "A lab misses one pack type and stalls the technology."
+      ],
+      "confidence": {
+        "level": "low",
+        "basis": [
+          "Authored decision procedure; use requires live applicability and supported tools. Difficulty is independent of evidence. No autonomous gameplay capability is established."
+        ]
+      },
+      "examples": []
+    },
+    {
+      "schema_version": 1,
+      "revision": 1,
+      "id": "skill-grow-generation-with-load",
+      "name": "Grow Generation With the Load",
+      "content_type": "skill",
+      "level": 2,
+      "kind": "utility",
+      "stage": "pattern",
+      "status": "candidate",
+      "summary": "Estimate electric load from live machine data before adding consumers, add generation in matched units with automatic fuel, and keep fluid networks within the admitted limit.",
+      "search_aliases": [
+        "brownout",
+        "low power",
+        "more steam engines",
+        "power capacity",
+        "boiler ratio",
+        "power demand"
+      ],
+      "goal_tags": [
+        "generation",
+        "load",
+        "brownout",
+        "boiler",
+        "fuel"
+      ],
+      "source": {
+        "kind": "manual",
+        "entity_unit_numbers": [],
+        "recipe_ids": [],
+        "evidence_refs": [
+          "curated:factorio-leveled-v1; owner-approved-method-catalog; native-mastery-unverified"
+        ]
+      },
+      "preconditions": [
+        {
+          "kind": "custom",
+          "subject": "live-applicability",
+          "description": "Check live capability, current goal, actor/surface and tool availability; an entry does not grant execution or plan authority."
+        }
+      ],
+      "inputs": [],
+      "outputs": [],
+      "topology": {
+        "nodes": [],
+        "relations": []
+      },
+      "constraints": [
+        {
+          "kind": "safety",
+          "description": "No stored recipes or ratios. Use fresh live tools. Preserve native mechanics, owner structures, committed semantics, reservations and harness recovery limits. Reconcile uncertain effects before further mutation.",
+          "validation": "unvalidated",
+          "evidence_refs": []
+        }
+      ],
+      "parameters": [],
+      "guidance": {
+        "when_to_use": "Adding electric consumers to a network, or machines report low power.",
+        "when_to_skip": "The added load is small against measured spare generation.",
+        "live_checks": [
+          "getPrototypeDetails for consumer energy usage, generator output and boiler consumption.",
+          "getEntityStatus for low-power status on consumers and the working state of generators.",
+          "factorio_capabilities limits.fluid_network_entities and getPlacementCandidates preservation_network for each fluid join."
+        ],
+        "steps": [
+          "Estimate the planned load from live energy usage before building the consumers.",
+          "Add generation in matched units, using the boiler-to-engine relation that live values give, each with automatic fuel.",
+          "Keep each fluid network within the admitted preservation limit; start a separate network from its own water source when a join would exceed it.",
+          "After the change, confirm consumers are not low-power and that fuel delivery keeps pace over a fresh window.",
+          "Keep power fuel from being taken first by other consumers on a shared belt."
+        ],
+        "completion": [
+          "Consumers run without low-power status over a fresh window and power fuel arrives automatically."
+        ],
+        "required_capabilities": [],
+        "related_ids": [
+          "steam-power-bootstrap",
+          "skill-protect-critical-supply",
+          "knowledge-machine-state",
+          "scale-out-production-line",
+          "knowledge-automation-progression-checkpoints"
+        ]
+      },
+      "verification": {
+        "structural": "not_tested",
+        "recipe_flow": "not_tested",
+        "placement_rebuild": "not_tested",
+        "production_output": "not_tested",
+        "belt_capacity": "unvalidated",
+        "inserter_sustained_throughput": "unvalidated",
+        "acceptance_conditions": []
+      },
+      "known_failure_modes": [
+        "A brownout slows every machine and is mistaken for a supply shortage.",
+        "Boilers starve because furnaces on the same fuel belt take the fuel first.",
+        "A fluid join is planned past the admitted preservation limit."
       ],
       "confidence": {
         "level": "low",
@@ -5342,6 +5879,175 @@
         ]
       },
       "examples": []
+    }
+  ],
+  "knowledge_categories": [
+    {
+      "id": "stage",
+      "name": "Game stages",
+      "summary": "Ordered stages of an automation goal: what reaches each stage, what does not count yet, and the methods that serve it.",
+      "ordered": true,
+      "records": [
+        {
+          "id": "stage-manual-bootstrap",
+          "name": "Stage: Manual Bootstrap",
+          "summary": "The agent hand-places the first machines and primes them. Priming is finite and declared up front; it only starts the next stage.",
+          "aliases": [
+            "bootstrap",
+            "start",
+            "first machines",
+            "priming",
+            "hand feeding"
+          ],
+          "reached_when": [
+            "The machines that will start the first self-fueling loop exist and the declared priming is done."
+          ],
+          "not_yet": [
+            "Priming that keeps recurring is an agent fuel run, not a bootstrap."
+          ],
+          "methods": [
+            "knowledge-acquisition-paths",
+            "missing-item-bootstrap",
+            "skill-minimum-useful-bootstrap",
+            "skill-reuse-before-building",
+            "skill-construction-kit-planning",
+            "direct-miner-smelting"
+          ]
+        },
+        {
+          "id": "stage-burner-loops",
+          "name": "Stage: Self-Sustaining Burner Loops",
+          "summary": "Burner mining and smelting whose fuel the system delivers, for example a coal loop primed once that feeds burner miners and furnaces. It automates the material supply that later builds electricity.",
+          "aliases": [
+            "burner loop",
+            "coal loop",
+            "burner miners",
+            "burner smelting",
+            "fuel delivery",
+            "automated fuel"
+          ],
+          "reached_when": [
+            "Fuel reaches every burner machine in the loop by belt or inserter, with no agent action, over a fresh observation window."
+          ],
+          "not_yet": [
+            "A loop that runs only on the priming or on repeated hand refueling."
+          ],
+          "methods": [
+            "burner-coal-loop",
+            "burner-inserter-refueling",
+            "direct-miner-smelting",
+            "starter-mining-belt-output",
+            "skill-manual-to-automatic-transition",
+            "skill-place-observe-connect",
+            "skill-prove-sustainment"
+          ]
+        },
+        {
+          "id": "stage-central-electricity",
+          "name": "Stage: Centralized Electricity",
+          "summary": "A power network whose fuel or service supply arrives automatically. It is the first finished-architecture checkpoint, not the first build: the supply that builds and fuels it comes from the earlier stages.",
+          "aliases": [
+            "electricity",
+            "power",
+            "steam power",
+            "centralized power",
+            "power network"
+          ],
+          "reached_when": [
+            "Generation runs with fuel delivered by the system and consumers are not short of power over a fresh window."
+          ],
+          "not_yet": [
+            "Generation running on prefilled fuel or hand-delivered fuel."
+          ],
+          "methods": [
+            "knowledge-machine-state",
+            "steam-power-bootstrap",
+            "skill-grow-generation-with-load",
+            "skill-protect-critical-supply",
+            "skill-complete-operating-cell",
+            "skill-prove-sustainment"
+          ]
+        },
+        {
+          "id": "stage-electric-mining-transfers",
+          "name": "Stage: Electric Mining and Transfers",
+          "summary": "Electric miners and electric transfers on the power network, where live unlocks and admitted placement allow. Burner machines from earlier stages are replaced here, not kept as the finished design.",
+          "aliases": [
+            "electric mining",
+            "electric miners",
+            "electric drills",
+            "electric inserters",
+            "replace burner"
+          ],
+          "reached_when": [
+            "Mining and transfers that the goal needs run on the network with automatic output."
+          ],
+          "not_yet": [
+            "A burner line kept in place of an electric miner the goal requires; report the capability gap instead."
+          ],
+          "methods": [
+            "knowledge-available-capabilities",
+            "knowledge-connection-geometry",
+            "starter-mining-belt-output",
+            "skill-deliberate-belt-routing",
+            "skill-direct-transfer",
+            "skill-check-unlocks-before-improvising"
+          ]
+        },
+        {
+          "id": "stage-smelting-arrays",
+          "name": "Stage: Separated Smelting Arrays",
+          "summary": "Smelting arrays apart from the ore patch, with automatic feed, output and, where the machines need it, fuel service, sized to the transport that serves them.",
+          "aliases": [
+            "smelting array",
+            "furnace column",
+            "smelting line",
+            "plate production"
+          ],
+          "reached_when": [
+            "Each array is fed and emptied automatically and its measured output matches what its transport carries."
+          ],
+          "not_yet": [
+            "Furnaces fed or emptied by the agent."
+          ],
+          "methods": [
+            "knowledge-owner-expandable-base",
+            "skill-size-array-to-transport",
+            "starter-smelting-row",
+            "scale-out-production-line",
+            "two-item-half-belt",
+            "belt-side-load-merge",
+            "skill-commission-before-copying"
+          ]
+        },
+        {
+          "id": "stage-sustained-consumption",
+          "name": "Stage: Sustained Downstream Consumption",
+          "summary": "Science and labs, or other consumers, running from the earlier stages without agent intervention.",
+          "aliases": [
+            "science",
+            "research",
+            "labs",
+            "downstream",
+            "unattended production"
+          ],
+          "reached_when": [
+            "Consumers keep working from automatic supply over a fresh window with no agent actions."
+          ],
+          "not_yet": [
+            "Hand-crafted or hand-delivered inputs."
+          ],
+          "methods": [
+            "knowledge-rates-stocks-freshness",
+            "knowledge-owner-tech-unlock-awareness",
+            "skill-size-research-to-supply",
+            "skill-define-production-interfaces",
+            "skill-manage-every-output",
+            "skill-find-actual-bottleneck",
+            "skill-prove-sustainment"
+          ]
+        }
+      ]
     }
   ]
 }

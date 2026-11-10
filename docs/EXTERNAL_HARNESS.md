@@ -77,9 +77,67 @@ admission and protected geometry, and refuses clearance. Missing guard capabilit
 unknown geometry, extra joins, changed targets or lost claim history fail closed.
 An unused frozen claim remains durable; deleting claims or the ledger is unsafe.
 
+`place_line` places a straight line of one prototype in one admitted operation:
+`{entity_name, x, y, direction?, line_direction, count, spacing?}`. Tile `i` is
+`(x, y)` plus `i * spacing` steps along `line_direction` (0 north, 4 east, 8 south,
+12 west); `direction` is each entity's own facing (default 0), `count` is 1–32
+(`capabilities.limits.line_count`) and `spacing` 1–8 (default 1). It is
+external-only: not part of the shared ordinary-agent or runtime-v8 catalog, and
+it needs the mod capability `external_line_placement_supported`. It names no
+prototype: any entity with a native zero-fluidbox witness may be lined (fluid-port
+prototypes refuse with `nonfluid_footprint_unproven`), and a tile whose footprint
+overlaps the previous tile's refuses with `line_tiles_overlap` (increase `spacing`).
+Preflight is strict and read-only: the actor must hold all `count` items, and every
+tile must pass the same exact-grid, NPC-reservation, native collision and external
+footprint checks as `place_entity`, within 128 tiles of the actor (rechecked at
+admission). Items on the ground and any other character block a tile. The actor's own
+character does not: execution steps out of each tile before placing it, so a line may
+start where the previous one ended. Any failing tile refuses the whole line before it is sent (`not_happened`), with
+`tile_index` and up to 8 blockers. When the native collision check itself refuses
+(`placement_not_clear`, here and for `place_entity`), `blockers` names the colliding
+entities or, when none collide, up to 4 colliding terrain tiles (`type: "tile"`); an
+empty list means the cause was not found. A refusal at admission (the world changed after
+preflight) is a terminal `native_refused_before_admission` receipt whose
+`evidence.refusal` names the guard code and, when the atomic preflight re-run refused,
+its `native_code`, `tile_index` and blockers. Execution queues `count` native placements in one
+journal slot; each placement re-checks its tile with the same footprint rule and the
+native `refuse_clearance` flag; if the actor stands inside a tile it steps
+out first. Nothing is cleared or replaced.
+A `completed` receipt requires the native line record to list every tile as placed;
+its `line_placement` field lists each entity (`index`, `unit_number`, `position`,
+`direction`). A blocker that appears during execution, or a cancel, stops the line.
+The receipt is then `partial` (`exact_line_placement_partial`): the placed prefix,
+which tiles are missing or were never placed, and the first refusal (`index`, `code`,
+`blockers`). It is never reported as success. A refusal on the first tile, before
+anything was placed, is a native proven refusal. After a restart or a batch generation
+change the line is `uncertain`; inspect the tiles instead of resubmitting blindly.
+A finished line also reads `uncertain` (`line_receipt_incomplete`) until a receipt reads
+the native line record of exactly this request and it lists every tile as placed.
+Script-placed poles and belts get the native placement result only; read
+`getEntityStatus` for wire connections and belt state.
+
+`pick_up_ground_items` picks up items lying on the ground (`item-on-ground`
+entities) in a small box: `{x, y, radius?}` covers the tiles within `radius` (0–2,
+default 0; `capabilities.limits.pickup_radius`) of `(x, y)`. Placement never clears a
+footprint, so this is the separate operation for a tile that a ground item blocks.
+It is external-only and needs the mod capability `external_ground_pickup_supported`.
+Preflight is read-only and within 128 tiles of the actor (rechecked at admission): it
+lists 1–16 ground stacks (`capabilities.limits.pickup_items`) and refuses with
+`no_ground_items`, `ground_items_over_limit` or `inventory_full` when the inventory
+cannot take one of them. Execution walks into reach and picks the stacks up by native
+character mining; it mines no tree, rock, building or resource in the box (as with
+every walk, navigation may clear a tree or rock that blocks the only path).
+It stops with `inventory_full` before mining a stack that no longer fits, and after 32
+pickups if items keep arriving. The receipt's `observed_effect` holds the inventory
+counts of the found items before and after; read the box again to confirm it is empty.
+
 `research_technology` submits native research; its completed operation receipt does
 not prove research completion. Read `getTechnology({name})` and
 `getResearchStatus({})` for current requirements, progress and researched state.
+`getResearchStatus` also lists `available`: up to 24 technologies the force can
+research now, each with the recipes it unlocks (`unlocks`, up to 12), its science
+ingredients and unit count, or `trigger_type` for a technology completed by its
+trigger rather than by labs. `getTechnology` lists `unlocks` for any technology.
 While other force research is active, a request is appended behind it in the
 native research queue (result `queued_behind`; preflight `ready_queued_behind`)
 and never replaces or reorders it. A prerequisite that is already current or
@@ -354,7 +412,11 @@ non-resource entity in the footprint, such as items on the ground or the actor.
 The bridge re-checks each footprint with that same rule: `eligible: false`
 names the blockers. `eligible: true` covers this footprint rule only; the other
 preflight checks still apply. Native candidate fields are unchanged, and
-`checked: false` means the re-check was unavailable.
+`checked: false` means the re-check was unavailable. The NPC's hidden vision
+vehicle (`sgluna-npc-vision`) has no collision and is never a blocker. A checked
+candidate whose footprint covers resource tiles also carries `covers_resources`,
+the tile count per resource name (for example `[{name: "iron-ore", tiles: 4}]`);
+it is a fact for the caller, not a refusal.
 The actor's own position counts as a blocker: walk clear of the footprint
 before placing there. A placed `burner-inserter` starts without fuel; it refuels
 itself only from fuel it moves, so supply fuel before relying on it.
@@ -372,6 +434,12 @@ after, and the actor inventory delta for the operation's item. It is an
 observation of the actor, not attribution. Other activity in the same ticks can
 contribute, and `available: false` means the actor could not be re-read. It is
 absent when the actor could not be read before submission.
+
+A completed `place_entity`, `place_candidate` or single-placement receipt may include
+`placed_entity` (`unit_number`, `entity_name`, `entity_type`, `position`,
+`direction`) from the native placement result whose batch identity is exactly this
+admission's. A later operation overwrites that result, so it may be absent; then read
+the position with `getNearbyEntities`.
 
 A running receipt carries the same observation as `observed_progress`, read
 once per reply and never stored; a waiting `factorio_get` reads it once, at the
@@ -391,19 +459,31 @@ are the native `defines.entity_status` values.
 
 `factorio_library` exposes separate `knowledge` references and `skill` methods.
 Use `action: "search"` with a nonempty `query` and optional `limit` (1–8), then
-`action: "get"` with the exact `id` for full guidance. Search cards are bounded;
+`action: "get"` with the exact `id` for full guidance. A library may declare
+knowledge categories; `factorio_capabilities` lists them under
+`library.knowledge_categories` with their name, summary, record count and
+whether they are ordered. A search with `kind: "knowledge"` and a `category`
+lists that category's records without a query, or searches only them with one.
+A record's `get` returns its authored fields, the methods it names and, for an
+ordered category, its position and neighbours. An unknown category is refused
+with `library_category_not_found`. Search cards are bounded;
 full entries are returned intact or refused above 7 KiB. A get call does not
 accept query/limit, and a search does not accept an ID. No full catalog is added
 to context automatically.
 
 ```json
 {"kind":"knowledge","action":"search","query":"individual refueling"}
-{"kind":"knowledge","action":"get","id":"knowledge-automation-progression-checkpoints"}
+{"kind":"knowledge","action":"search","category":"stage"}
+{"kind":"knowledge","action":"get","id":"stage-burner-loops"}
 {"kind":"skill","action":"search","query":"smelting"}
 ```
 
 All three modes on `main` share the leveled method library from the selected
-source revision. `factorio_library` reads its exported fixture
+source revision. The loader knows no category, entry or count by name: it validates the pack's
+structure (schema, unique ids, method and related ids that resolve, bounded
+size) and reports what the pack contains, so a different library loads through
+the same code (`openLibrary({ file, source })`). The shipped library's
+`stage` category holds ordered game stages. `factorio_library` reads its exported fixture
 `packages/autorio/src/fixtures/leveled-library-v1.json`; see
 [the local library](../tools/external-harness/library/README.md) for the source
 and regeneration. Source IDs are retained in each entry. Full skill
@@ -411,22 +491,20 @@ and regeneration. Source IDs are retained in each entry. Full skill
 not exposed as authority. All entries remain untrusted advisory content, not
 current availability, live facts, native mastery or permission to act.
 
-For this owner, the default full-automation progression is centralized,
-automatically sustained electricity first; electric mining and electric transfers
-where available; then separated smelting arrays with automatic feed, output and
-service. The agent must not fuel individual machines as the operating design.
-Initial manual priming is a declared finite bootstrap phase only. Automatically
-supply central power fuel and any smelting fuel required by live machines.
-Prefilled burner stocks or a short production demonstration do not establish
-full automation. Relevant fuel/power/mining/smelting/sustainment method views link
-to this requirement; burner methods may serve bootstrap without becoming the
-finished architecture.
+The MCP instructions point the operator to the library before each new part
+of a goal and name no category or entry. Goal acceptance is not a harness
+prompt: state it in the goal text. For this owner's full-automation goals that
+text carries the owner bar: the agent must not fuel individual machines as the
+operating design, and initial manual priming is a declared finite bootstrap
+phase only. Prefilled stocks or a short production demonstration do not
+establish full automation.
 
-Read current prototype/technology/recipe and tool facts first, including the
-admitted electric-miner candidate capability. Library guidance does not add
-operations or prove an unlock. Surface any missing capability before a future
-goal rather than silently substitute burner miners. This update does not deploy
-or launch a model trial.
+Read current prototype/technology/recipe and tool facts first, including which
+placement path a prototype needs: `place_entity` for nonfluid prototypes,
+`getPlacementCandidates` and `place_candidate` for prototypes with fluid ports.
+Prompts name no prototype; capabilities and refusals carry these facts, so a
+mod that renames or replaces entities needs no prompt change. Library guidance
+does not add operations or prove an unlock.
 
 ## Automatic production tools
 
@@ -509,6 +587,27 @@ actor's force and surface, while geometry reports native force/surface identitie
 for the caller to check before claiming a production connection. Manual input delivery
 or handcrafting the final product does not prove a fully automatic production
 chain; a run must freeze and verify its own acceptance window and provenance.
+
+### Accelerated hands-off measurement (supervisor only)
+
+`tools/external-harness/measure-window.mjs` measures an unattended window faster
+than real time. It is not an MCP tool; the supervisor runs it after the operator
+stops making calls, with the NPC idle and zero humans connected:
+
+```bash
+node tools/external-harness/measure-window.mjs --evidence <new dir> --speed 8 --ticks 72000
+```
+
+It reads force production statistics, research state and the actor inventory at
+1×, then arms the mod's `sgluna_measurement_sprint` window. The engine restores
+1× itself at the end tick, or earlier when a human joins, the actor changes or is
+damaged, an enemy comes near, native work starts or the speed changes. A host
+watchdog ends a window that has not finished within its 1× duration plus two
+minutes. While the window runs the bridge refuses operator actions
+(`nonstandard_game_speed`). The result is valid only when `reason` is
+`window_complete`; rates are per game minute from actual native ticks, and
+`observed_speed` is game time over wall time. Speed is limited to 2–16× and a
+window to 108,000 ticks. Each measurement id can be used once.
 
 ## Interruption, cancellation and restart
 

@@ -4,7 +4,7 @@ import test from 'node:test'
 
 import { libraryMetadata } from './library.mjs'
 import { MCP_PROTOCOL_VERSION, MCP_TOOLS } from './mcp-server.mjs'
-import { capabilities, OBSERVATION_NAMES, OPERATION_NAMES } from './native-bridge.mjs'
+import { capabilities, LINE_PLACEMENT_DOMAIN, OBSERVATION_NAMES, OPERATION_NAMES } from './native-bridge.mjs'
 
 const manifest = JSON.parse(readFileSync(new URL('../../contracts/factorio-tool-contract.json', import.meta.url), 'utf8'))
 const external = manifest.external_harness
@@ -24,7 +24,11 @@ test('external subset and MCP lifecycle exactly match the canonical manifest', (
   assert.equal(external.observations.includes(binding.name), false, 'immutable metadata selection is not a cacheable observation')
   assert.equal(external.protocol_version, MCP_PROTOCOL_VERSION)
   assert.equal(external.operation_admission_protocol, 2)
-  for (const name of external.operations) assert.ok(manifest.operations[name].surfaces.includes('pterodactyl-runtime-v8'))
+  // External-only operations are not part of the shared ordinary-agent/runtime-v8 operation set.
+  for (const name of external.operations) {
+    if (Object.hasOwn(external.external_only_operations, name)) assert.ok(!Object.hasOwn(manifest.operations, name), name)
+    else assert.ok(manifest.operations[name].surfaces.includes('pterodactyl-runtime-v8'), name)
+  }
   for (const name of external.observations) assert.ok(manifest.tools[name].surfaces.includes('pterodactyl-runtime-v8'))
 })
 
@@ -62,6 +66,7 @@ test('external library manifest agrees with typed local capability metadata', ()
   assert.equal(external.library.source, meta.source)
   assert.equal(external.library.knowledge, meta.counts.knowledge)
   assert.equal(external.library.skills, meta.counts.skills)
+  assert.deepEqual(external.library.knowledge_categories, meta.knowledge_categories.map(({ id, ordered, records }) => ({ id, ordered, records })))
   assert.equal(external.library.result_bytes, meta.result_bytes)
   assert.equal(external.library.read_only, true)
 })
@@ -71,4 +76,55 @@ test('the declared fluid network limit is the native preservation guard bound', 
   assert.equal(Number(source.match(/const MAX_PROTECTED_FLUID_ENTITIES = (\d+)/)?.[1]), external.limits.fluid_network_entities)
   assert.equal(capabilities().limits.fluid_network_entities, external.limits.fluid_network_entities)
   assert.ok(capabilities().operation_notes.place_candidate.includes(`at most ${external.limits.fluid_network_entities} entities`))
+})
+
+test('external-only line placement agrees with the bridge and the native mod', () => {
+  const catalog = capabilities()
+  const line = catalog.operations.find(operation => operation.name === 'place_line')
+  assert.deepEqual(line.args, external.external_only_operations.place_line.args)
+  assert.equal(external.line_placement_domain, LINE_PLACEMENT_DOMAIN)
+  assert.equal(catalog.limits.line_domain, LINE_PLACEMENT_DOMAIN)
+  assert.equal(external.line_placement_prototypes, undefined)
+  assert.equal(catalog.limits.line_count, external.limits.line_count)
+  assert.equal(catalog.limits.line_spacing, external.limits.line_spacing)
+  const mod = readFileSync(new URL('../../packages/autorio/src/line_placement.ts', import.meta.url), 'utf8')
+  assert.match(mod, new RegExp(`count: ${external.limits.line_count}, spacing: ${external.limits.line_spacing}, history: \\d+, blockers: ${external.limits.footprint_blockers},`))
+  assert.equal(Number(mod.match(/EXTERNAL_FOOTPRINT_SCAN_LIMIT = (\d+)/)?.[1]), external.limits.footprint_scan)
+  // A completed line's record must outlive its admission, or an old line's receipt turns uncertain and fences submissions.
+  const admission = readFileSync(new URL('../../packages/autorio/src/operation_admission.ts', import.meta.url), 'utf8')
+  const lineHistory = Number(mod.match(/LINE_PLACEMENT_LIMITS = \{[^}]*history: (\d+)/)?.[1])
+  const admissionHistory = Number(admission.match(/ADMISSION_LIMITS = \{[^}]*history: (\d+)/)?.[1])
+  assert.ok(Number.isSafeInteger(admissionHistory) && lineHistory >= admissionHistory, `line history ${lineHistory} >= admission history ${admissionHistory}`)
+  // No prototype list on either side: the game decides what is placeable; the mod refuses overlapping tiles.
+  assert.doesNotMatch(mod, /LINE_PLACEMENT_PROTOTYPES/)
+  assert.ok(mod.includes("code: 'line_tiles_overlap'"))
+  const bridge = readFileSync(new URL('../../deploy/pterodactyl/runtime-v8/operator-native-bridge.mjs', import.meta.url), 'utf8')
+  assert.ok(bridge.includes(`limit=${external.limits.footprint_scan}}); if #found>=${external.limits.footprint_scan} then`))
+  assert.ok(bridge.includes(`#blockers<${external.limits.footprint_blockers} and blocks(e) then`))
+  assert.ok(mod.includes(`blockers.length < LINE_PLACEMENT_LIMITS.blockers`) && mod.includes('footprint_blocker(entity, placed)'))
+  const control = readFileSync(new URL('../../packages/autorio/src/control.ts', import.meta.url), 'utf8')
+  assert.match(control, /external_line_placement_supported: 1/)
+  assert.equal(external.line_placement_native_safety.required_capability, 'external_line_placement_supported')
+  assert.ok(catalog.operation_notes.place_line.includes(String(external.limits.line_count)))
+})
+
+test('external-only ground-item pickup agrees with the bridge and the native mod', () => {
+  const catalog = capabilities()
+  const pickup = catalog.operations.find(operation => operation.name === 'pick_up_ground_items')
+  assert.deepEqual(pickup.args, external.external_only_operations.pick_up_ground_items.args)
+  assert.equal(pickup.arguments.radius.default, external.external_only_operations.pick_up_ground_items.defaults.radius)
+  assert.equal(pickup.arguments.radius.maximum, external.limits.pickup_radius)
+  assert.equal(catalog.limits.pickup_radius, external.limits.pickup_radius)
+  assert.equal(catalog.limits.pickup_items, external.limits.pickup_items)
+  const mod = readFileSync(new URL('../../packages/autorio/src/ground_item_pickup.ts', import.meta.url), 'utf8')
+  assert.match(mod, new RegExp(`export const MAX_PICKUP_RADIUS = ${external.limits.pickup_radius}\\r?\\n`))
+  const items = readFileSync(new URL('../../packages/autorio/src/placement_ground_items.ts', import.meta.url), 'utf8')
+  assert.match(items, new RegExp(`export const MAX_GROUND_ITEMS = ${external.limits.pickup_items}\\r?\\n`))
+  const control = readFileSync(new URL('../../packages/autorio/src/control.ts', import.meta.url), 'utf8')
+  assert.match(control, /external_ground_pickup_supported: 1/)
+  assert.match(control, /pick_up_ground_items: \(x: number, y: number, radius: number = 0\)/)
+  assert.equal(external.ground_pickup_native_safety.required_capability, 'external_ground_pickup_supported')
+  const admission = readFileSync(new URL('../../packages/autorio/src/operation_admission.ts', import.meta.url), 'utf8')
+  assert.match(admission.match(/PURE_SUBMIT_OPERATIONS = \[[^\]]*\]/)?.[0] ?? '', /'pick_up_ground_items'/)
+  assert.ok(catalog.operation_notes.pick_up_ground_items.includes(`1-${external.limits.pickup_items} ground stacks`))
 })

@@ -45,8 +45,9 @@ runtime. Unsupported actions are a limitation, not permission to use a console,
 raw RCON, generated Lua or shell command as an alternate gameplay channel.
 Never inject items, teleport the actor or fabricate completion.
 
-The placement slice permits only the advertised nonfluid furnace, burner drill
-and wooden chest, at explicit exact-grid coordinates on a proven clear footprint.
+`place_entity` places nonfluid prototypes at explicit exact-grid coordinates on
+a proven clear footprint; prototypes with fluid ports use `getPlacementCandidates`
+and `place_candidate`. Read which applies from capabilities and refusals.
 Native execution forbids clearing even if a blocker arrives after admission.
 Do not turn a placement refusal into a demolition request. Discover the actual
 new entity and verify identity/output before advancing or supplying it.

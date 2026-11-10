@@ -4,7 +4,8 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { withMcpClient } from './mcp-call.mjs'
+import { lockHolderFrom, withMcpClient } from './mcp-call.mjs'
+import { openRuntime } from './runtime.mjs'
 import { MCP_TOOLS } from './mcp-server.mjs'
 import { checkSetup } from './setup-check.mjs'
 
@@ -25,7 +26,7 @@ const context = ${JSON.stringify(context)};
 const calls = [];
 const runtime = {
  bindMachineDelivery: async () => { calls.push('FORBIDDEN-bind'); throw new Error('forbidden') },
- library: async () => { calls.push('library'); return {kind:'knowledge',entry:{id:'knowledge-automation-progression-checkpoints',content_type:'knowledge'},authority:{native_verified:false,operation_authority:false}} },
+ library: async () => { calls.push('library'); return {kind:'knowledge',action:'search',results:[],authority:{native_verified:false,operation_authority:false}} },
  context: async () => { calls.push('context'); return context },
  capabilities: async () => { calls.push('capabilities'); return { operations: [{name:'wait'}], observation_schemas:[{name:'getActorStatus',inputSchema:{type:'object'}}] } },
  observe: async value => { calls.push('observe'); return { mode:'npc',actor:{kind:'standalone_character',valid:true,actor_id:context.actor.actor_id},connected_players:0 } },
@@ -123,8 +124,41 @@ test('a held state lock is reported as state_locked, not an opaque mcp_exited', 
   await assert.rejects(withMcpClient(() => {}, { command: process.execPath, args: ['-e', 'process.exit(75)'] }), error => {
     assert.equal(error.code, 'state_locked')
     assert.equal(error.cleanupCode, 'mcp_child_failed')
+    assert.equal(error.holder, undefined)
     return true
   })
+  // Trial 4r: six overlapping calls were refused without naming the running call. The refused child names the holder in one
+  // validated stderr line; only that line is read, and a credential elsewhere in stderr never reaches the error.
+  const named = 'process.stderr.write("private-test-credential-not-for-output\\nSGLUNA_STATE_LOCK_HOLDER {\\"pid\\":4242,\\"call\\":\\"factorio_receipt\\",\\"held_seconds\\":3,\\"extra\\":\\"x\\"}\\n");process.exit(75)'
+  await assert.rejects(withMcpClient(() => {}, { command: process.execPath, args: ['-e', named] }), error => {
+    assert.equal(error.code, 'state_locked')
+    assert.deepEqual(error.holder, { pid: 4242, call: 'factorio_receipt', held_seconds: 3 })
+    assert.equal(JSON.stringify(error).includes('private-test-credential'), false)
+    assert.equal(error.stack.includes('private-test-credential'), false)
+    return true
+  })
+  assert.equal(lockHolderFrom('SGLUNA_STATE_LOCK_HOLDER {"pid":"1; rm","call":"Bad Call"}'), undefined)
+})
+
+test('the state lock records the call it serves, and a second open names it', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'lock-holder-'))
+  t.after(() => fs.rm(directory, { recursive: true, force: true }))
+  const bridge = { context: async () => ({}) }
+  const session = 'external-lock-holder-test-0000000000001'
+  const first = await openRuntime({ bridge, directory, session, callLabel: 'factorio_submit' })
+  await assert.rejects(openRuntime({ bridge, directory, session, callLabel: 'factorio_receipt' }), error => {
+    assert.equal(error.code, 'state_locked')
+    assert.equal(error.details.held_by.pid, process.pid)
+    assert.equal(error.details.held_by.call, 'factorio_submit')
+    assert.ok(Number.isSafeInteger(error.details.held_by.held_seconds))
+    assert.match(error.message, new RegExp(`locked by pid ${process.pid} \\(factorio_submit\\) for \\d+ s`))
+    return true
+  })
+  await first.close()
+  // A malformed label is never written.
+  const second = await openRuntime({ bridge, directory, session, callLabel: 'Bad Label!' })
+  assert.deepEqual(Object.keys(JSON.parse(await fs.readFile(path.join(directory, 'owner.lock'), 'utf8'))).sort(), ['owner', 'pid', 'started_at'])
+  await second.close()
 })
 
 test('default adapter deadline preserves a supported 30-second receipt wait past 15 seconds', async t => {

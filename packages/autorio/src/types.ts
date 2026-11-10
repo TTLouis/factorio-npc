@@ -148,6 +148,13 @@ export interface PlayerParametersClearConstructionArea {
   width: number
   height: number
   cleared_count: number
+  /**
+   * External pick_up_ground_items (ground_item_pickup.ts): only item-on-ground entities are targets, the task fails with
+   * inventory_full rather than start mining a stack the inventory cannot take, and with ground_item_pickup_limit after
+   * max_clears pickups. Without it the task clears every clearable construction blocker as before.
+   */
+  item_entities_only?: boolean
+  max_clears?: number
   target?: LuaEntity | null
   target_name?: string
   target_position?: MapPositionStruct
@@ -196,6 +203,12 @@ export interface PlayerParametersPlaceEntity {
    * actual entities just before create_entity and binds the placed unit_number to the node right after it.
    */
   layout_node?: { layout_id: number, index: number }
+  /**
+   * The tile of an external line placement this task places (storage.sgluna_line_placements, line_placement.ts). Set only
+   * by place_line, always with refuse_clearance: the runtime re-checks the external footprint rule just before
+   * create_entity and records the placed entity on the line right after it.
+   */
+  line_node?: { line_id: number, index: number }
   /**
    * Entities this placement has mined out of its footprint, as measured by the
    * inventory. Any entry means the task changed the world, like a ground-item

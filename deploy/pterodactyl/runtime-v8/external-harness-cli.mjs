@@ -45,6 +45,9 @@ export function configuration(env) {
     session: env.EXTERNAL_HARNESS_SESSION, directory: path.resolve(env.EXTERNAL_HARNESS_STATE_DIR) }
 }
 
+// One stderr line naming the state-lock holder; the process adapter reads only this line from a refused child.
+export const LOCK_HOLDER_PREFIX = 'SGLUNA_STATE_LOCK_HOLDER '
+
 export async function main(args = process.argv.slice(2), env = process.env) {
   requireHarnessMode('external', env)
   if (args.length === 1 && args[0] === '--help') { process.stdout.write(HELP); return }
@@ -52,7 +55,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
   const config = configuration(env)
   const rcon = new Rcon(config.port, config.password, 5000, { host: config.host })
   const bridge = new NativeBridge({ rcon, session: config.session })
-  const runtime = await openRuntime({ bridge, directory: config.directory, session: config.session })
+  const runtime = await openRuntime({ bridge, directory: config.directory, session: config.session, callLabel: env.SGLUNA_CALL_LABEL })
   let server
   const stop = () => server?.stop()
   try {
@@ -86,12 +89,18 @@ export async function main(args = process.argv.slice(2), env = process.env) {
   }
 }
 
+// Shared by every entrypoint: the process adapter spawns tools/external-harness/cli.mjs, so the
+// lock-holder line must come from here, not from this module's own direct-run branch.
+export function reportCliFailure(error, stderr = process.stderr) {
+  const code = typeof error?.code === 'string' && /^[a-z_]{1,80}$/.test(error.code) ? error.code : 'startup_or_transport_failed'
+  stderr.write(`External harness stopped: ${code}. No automatic gameplay replay was attempted.\n`)
+  // The holder's pid, call label and seconds held, already validated by the runtime.
+  if (code === 'state_locked' && error.details?.held_by) stderr.write(`${LOCK_HOLDER_PREFIX}${JSON.stringify(error.details.held_by)}\n`)
+  // A distinct exit status lets the process adapter name a held state lock
+  // without reading this process's stderr.
+  return code === 'state_locked' ? STATE_LOCKED_EXIT_CODE : 1
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main().catch(error => {
-    const code = typeof error?.code === 'string' && /^[a-z_]{1,80}$/.test(error.code) ? error.code : 'startup_or_transport_failed'
-    process.stderr.write(`External harness stopped: ${code}. No automatic gameplay replay was attempted.\n`)
-    // A distinct exit status lets the process adapter name a held state lock
-    // without reading this process's stderr.
-    process.exitCode = code === 'state_locked' ? STATE_LOCKED_EXIT_CODE : 1
-  })
+  main().catch(error => { process.exitCode = reportCliFailure(error) })
 }

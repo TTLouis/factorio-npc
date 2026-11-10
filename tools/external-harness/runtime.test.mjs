@@ -7,7 +7,7 @@ import test from 'node:test'
 
 import { operationSignature } from '../../deploy/pterodactyl/runtime-v8/operation-reconciliation.mjs'
 import { configuration } from './cli.mjs'
-import { openRuntime, writeFailureCause } from './runtime.mjs'
+import { openRuntime, refusalCause, writeFailureCause } from './runtime.mjs'
 
 const session = 'external-test-session-00000000000001'
 const operation = { name: 'wait', args: { ticks: 60 } }
@@ -137,6 +137,21 @@ test('explicit proven nonadmission is safely rejected and same key is never reus
   f.setSendError(null)
   assert.equal((await runtime.submit({ request_id: 'refused', operation })).state, 'rejected')
   assert.equal(f.calls.filter(([name]) => name === 'submit').length, 1)
+})
+
+// Trial 4r r4-063: a place_line passed preflight, then was refused at admission with no cause in the receipt.
+test('a refusal at admission keeps its native cause in the terminal receipt', async t => {
+  const f = await fixture(t); const runtime = await f.open()
+  const blockers = [{ name: 'character', type: 'character', position: { x: 33.5, y: 16.5 } }]
+  f.setSendError(Object.assign(new Error('external guard refused'), { notAdmitted: true, code: 'preflight_rejected',
+    details: { native_code: 'placement_footprint_occupied', tile_index: 0, blockers } }))
+  const result = await runtime.submit({ request_id: 'refused-cause', operation })
+  assert.equal(result.state, 'rejected'); assert.equal(result.reason, 'native_refused_before_admission')
+  assert.deepEqual(result.execution.evidence, { admission_refused_before_mutation: true,
+    refusal: { code: 'preflight_rejected', native_code: 'placement_footprint_occupied', tile_index: 0, blockers } })
+  // A begin refusal from the admission journal names its code; free text is never copied.
+  assert.deepEqual(refusalCause({ factorioError: 'admission_begin_refused:stale_actor_epoch' }), { code: 'stale_actor_epoch' })
+  assert.equal(refusalCause({ code: 'Not An Id!' }), undefined)
 })
 
 test('bounded receipt waits release the mutex so exact cancel can interrupt', async t => {

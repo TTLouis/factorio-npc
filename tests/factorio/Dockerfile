@@ -45,6 +45,11 @@ COPY --from=build /src/packages/autorio/dist /opt/factorio/mods/autorio_0.1.0
 COPY tests/factorio/fixtures/visibility-link-prototypes.lua /opt/factorio/mods/autorio_0.1.0/data-final-fixes.lua
 COPY --from=build /src/deploy/pterodactyl/staging /test/pterodactyl/staging
 COPY --from=build /src/deploy/pterodactyl/runtime-v8 /test/pterodactyl/runtime-v8
+# The external-harness bridge in its repository-relative layout, for lanes that drive it end to end.
+COPY --from=build /src/tools/external-harness/native-bridge.mjs /test/external-harness/tools/external-harness/native-bridge.mjs
+COPY --from=build /src/tools/external-harness/measure-window.mjs /test/external-harness/tools/external-harness/measure-window.mjs
+COPY --from=build /src/deploy/pterodactyl/staging /test/external-harness/deploy/pterodactyl/staging
+COPY --from=build /src/deploy/pterodactyl/runtime-v8 /test/external-harness/deploy/pterodactyl/runtime-v8
 COPY tests/factorio/runner /test/runner
 COPY tests/factorio/fixtures /test/fixtures
 COPY tests/factorio/run.sh /test/run.sh

@@ -11,7 +11,9 @@ const object = (properties = {}, required = []) => ({ type: 'object', properties
 const identifier = { type: 'string', minLength: 1, maxLength: 192 }
 const name = { type: 'string', minLength: 1, maxLength: 100 }
 const args = { type: 'object', additionalProperties: true }
-const operationReference = object({ operation_id: identifier }, ['operation_id'])
+// Trial 5: refused submissions have no operation_id, and a helper sent "" hundreds of times; the refusal says why.
+const operationId = { ...identifier, description: 'The operation_id returned by an admitted factorio_submit. A refused submission has none; read its refusal instead of a receipt.' }
+const operationReference = object({ operation_id: operationId }, ['operation_id'])
 const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
 const mutation = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }
 
@@ -29,11 +31,11 @@ export const OPERATOR_TOOLS = Object.freeze([
   },
   {
     name: 'factorio_library',
-    description: 'Search or read one authored knowledge reference or gameplay skill. Local read-only advisory content; no RCON, live availability, native proof or execution authority. Search methods on demand, then obtain current game facts with observations. Read knowledge-automation-progression-checkpoints to classify the current automation stage before applying fuel, power, mining or smelting methods.',
+    description: 'Search or read one authored knowledge reference or gameplay skill. Local read-only advisory content; no RCON, live availability, native proof or execution authority. Search methods on demand, then obtain current game facts with observations. The loaded library may declare knowledge categories (factorio_capabilities library.knowledge_categories); search kind=knowledge with a category to list or search only its records, in authored order when the category is ordered.',
     inputSchema: object({ kind: { type: 'string', enum: ['knowledge', 'skill'], minLength: 1, maxLength: 9 },
       action: { type: 'string', enum: ['search', 'get'], minLength: 1, maxLength: 6 },
       query: { type: 'string', minLength: 1, maxLength: 160 }, id: { type: 'string', minLength: 1, maxLength: 100 },
-      limit: { type: 'integer', minimum: 1, maximum: 8 } }, ['kind', 'action']), annotations: readOnly,
+      limit: { type: 'integer', minimum: 1, maximum: 8 }, category: { type: 'string', minLength: 1, maxLength: 40, description: 'A knowledge category id from factorio_capabilities library.knowledge_categories.' } }, ['kind', 'action']), annotations: readOnly,
   },
   {
     name: 'factorio_context',
@@ -54,7 +56,7 @@ export const OPERATOR_TOOLS = Object.freeze([
   {
     name: 'factorio_receipt',
     description: 'Read the exact operation receipt, optionally waiting at most 30 seconds for progress. Running, partial, interrupted, and uncertain are not success. Prefer bounded waits to rapid polling; cancellation remains available during a wait.',
-    inputSchema: object({ operation_id: identifier, wait_ms: { type: 'integer', minimum: 0, maximum: 30000, default: 0 } }, ['operation_id']),
+    inputSchema: object({ operation_id: operationId, wait_ms: { type: 'integer', minimum: 0, maximum: 30000, default: 0 } }, ['operation_id']),
     annotations: readOnly,
   },
   {
@@ -95,7 +97,7 @@ export function validateToolArguments(value, schema, path = 'arguments') {
   }
   else if (schema.type === 'string') {
     if (typeof value !== 'string' || value.length < schema.minLength || value.length > schema.maxLength) {
-      throw rpcError(-32602, `${path} must be a bounded nonempty string`)
+      throw rpcError(-32602, `${path} must be a bounded nonempty string${schema.description ? `. ${schema.description}` : ''}`)
     }
   }
   else if (schema.type === 'integer') {

@@ -56,7 +56,11 @@ function fixture() {
     }),
   }
   const character: any = { valid: true, reach_distance: 10, resource_reach_distance: 2.7, selected: undefined }
+  const room = { fits: true }
+  // Without room only part of the stack fits, which must still stop the pickup.
+  const inventory = { get_insertable_count: vi.fn((stack: { count: number }) => room.fits ? stack.count : Math.max(0, stack.count - 1)) }
   const actor = {
+    get_main_inventory: () => inventory,
     is_valid: true,
     character,
     position: { x: 0, y: 0 },
@@ -81,7 +85,13 @@ function fixture() {
   } as unknown as ControlledActor
   const manager = new_task_manager(() => actor)
   const controller = new_area_clearing_controller(() => actor, manager)
-  return { actor, manager, controller, treeA, treeB, rock, resource, machine, treeOutside }
+  return { actor, manager, controller, treeA, treeB, rock, resource, machine, treeOutside, entities, room, inventory }
+}
+
+function ground_item(name: string, count: number, x: number) {
+  const item = entity('item-on-ground', 'item-entity', x)
+  item.stack = { valid_for_read: true, name, count }
+  return item
 }
 
 beforeEach(() => {
@@ -298,5 +308,70 @@ describe('construction-area finite blocker clearing', () => {
     expect(f.resource.valid).toBe(true)
     expect(f.machine.valid).toBe(true)
     expect(f.treeOutside.valid).toBe(true)
+  })
+})
+
+// Trial 4r: ore a drill dropped blocked belt tiles. The external pick_up_ground_items operation is this task restricted to
+// item-on-ground entities: it mines them like a player picks them up and touches nothing else in the box.
+describe('ground-item pickup (item-on-ground entities only)', () => {
+  const PICKUP = { item_entities_only: true as const, max_clears: 32 }
+
+  it('mines only the items on the ground, leaves trees, rocks and buildings, and finishes when the box holds none', () => {
+    const f = fixture()
+    const ore = ground_item('iron-ore', 3, 1.8)
+    f.entities.push(ore)
+    expect(f.controller.submit(1, 0, 5, 5, PICKUP)).toEqual([true, 'Ground-item pickup task started'])
+    f.controller.tick(f.actor)
+    expect(f.manager.player_state.parameters_clear_construction_area?.target).toBe(ore)
+    expect(f.actor.set_mining_state).toHaveBeenCalledWith({ mining: true, position: ore.position })
+    expect(f.inventory.get_insertable_count).toHaveBeenCalledWith(ore.stack)
+
+    ore.valid = false
+    f.actor.set_mining_state({ mining: false })
+    f.controller.tick(f.actor)
+    expect(f.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    for (const kept of [f.treeA, f.treeB, f.rock, f.resource, f.machine]) expect(kept.valid).toBe(true)
+    expect(f.actor.set_mining_state).not.toHaveBeenCalledWith(expect.objectContaining({ position: f.treeA.position }))
+  })
+
+  it('stops with a refusal instead of mining a stack the inventory cannot take', () => {
+    const f = fixture()
+    f.entities.push(ground_item('iron-ore', 50, 1.8))
+    f.room.fits = false
+    expect(f.controller.submit(1, 0, 5, 5, PICKUP)[0]).toBe(true)
+    f.controller.tick(f.actor)
+    expect(f.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(f.actor.set_mining_state).not.toHaveBeenCalledWith(expect.objectContaining({ mining: true }))
+  })
+
+  it('stops after max_clears pickups rather than chasing a drop tile that keeps refilling', () => {
+    const f = fixture()
+    const first = ground_item('iron-ore', 1, 1.8)
+    const second = ground_item('iron-ore', 1, 2.2)
+    f.entities.push(first, second)
+    expect(f.controller.submit(1, 0, 5, 5, { item_entities_only: true, max_clears: 1 })[0]).toBe(true)
+    const cancel = vi.spyOn(f.manager, 'cancel_all_tasks')
+    f.controller.tick(f.actor)
+    first.valid = false
+    f.actor.set_mining_state({ mining: false })
+    f.controller.tick(f.actor)
+    expect(f.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(cancel).toHaveBeenCalledWith('clear_construction_area:ground_item_pickup_limit')
+    expect(second.valid).toBe(true)
+    expect(f.actor.set_mining_state).not.toHaveBeenCalledWith({ mining: true, position: second.position })
+  })
+
+  it('finishes, not fails, when the box is empty right after the last allowed pickup', () => {
+    const f = fixture()
+    const only = ground_item('iron-ore', 1, 1.8)
+    f.entities.push(only)
+    expect(f.controller.submit(1, 0, 5, 5, { item_entities_only: true, max_clears: 1 })[0]).toBe(true)
+    const cancel = vi.spyOn(f.manager, 'cancel_all_tasks')
+    f.controller.tick(f.actor)
+    only.valid = false
+    f.actor.set_mining_state({ mining: false })
+    f.controller.tick(f.actor)
+    expect(f.manager.player_state.task_state).toBe(TaskStates.IDLE)
+    expect(cancel).not.toHaveBeenCalled()
   })
 })

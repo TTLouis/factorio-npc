@@ -57,13 +57,26 @@ function position_inside_area(position: { x: number, y: number }, area: ReturnTy
     && position.y <= area.right_bottom.y
 }
 
+function task_target(task: PlayerParametersClearConstructionArea, entity: LuaEntity) {
+  return clearable_construction_blocker(entity) && (!task.item_entities_only || entity.type === 'item-entity')
+}
+
+// The actor inventory can take this whole ground stack now.
+function ground_stack_fits(actor: ControlledActor, entity: LuaEntity) {
+  const stack = entity.stack
+  const inventory = actor.get_main_inventory()
+  if (!stack || !stack.valid_for_read || !inventory) return false
+  // can_insert is true when only part of the stack fits; the whole stack must.
+  return inventory.get_insertable_count(stack) >= stack.count
+}
+
 function nearest_blocker(actor: ControlledActor, task: PlayerParametersClearConstructionArea) {
   const area = task_area(task)
-  const entities = find_world_entities(actor.surface, { area })
+  const entities = find_world_entities(actor.surface, task.item_entities_only ? { area, type: 'item-entity' } : { area })
   let nearest: LuaEntity | undefined
   let best = math.huge
   for (const entity of entities) {
-    if (!position_inside_area(entity.position, area) || !clearable_construction_blocker(entity)) continue
+    if (!position_inside_area(entity.position, area) || !task_target(task, entity)) continue
     const distance = squared_distance(actor.position, entity.position)
     if (distance < best) {
       nearest = entity
@@ -131,7 +144,7 @@ export function new_area_clearing_controller(
     log(`[AUTORIO] [ERROR] Construction area clearing failed: ${reason}`)
   }
 
-  function submit(x: number, y: number, width: number, height: number): [boolean, string] {
+  function submit(x: number, y: number, width: number, height: number, options?: { item_entities_only: true, max_clears: number }): [boolean, string] {
     if (!valid_coordinate(x) || !valid_coordinate(y)) return [false, 'x and y must be finite bounded map coordinates']
     if (!valid_integer(width, 1, MAX_DIMENSION) || !valid_integer(height, 1, MAX_DIMENSION) || width * height > MAX_AREA_TILES) {
       return [false, `width/height must be positive integers <= ${MAX_DIMENSION} with area <= ${MAX_AREA_TILES} tiles`]
@@ -149,11 +162,12 @@ export function new_area_clearing_controller(
       width,
       height,
       cleared_count: 0,
+      ...(options ? { item_entities_only: true, max_clears: options.max_clears } : {}),
       owner_actor_id: identity.actor_id,
       owner_actor_kind: identity.kind,
       owner_force_index: actor.force.index,
     })
-    return [true, 'Construction-area clearing task started']
+    return [true, options ? 'Ground-item pickup task started' : 'Construction-area clearing task started']
   }
 
   function reposition_after_rejected_start(actor: ControlledActor, task: PlayerParametersClearConstructionArea, target: LuaEntity) {
@@ -187,7 +201,7 @@ export function new_area_clearing_controller(
       task.cleared_count++
       clear_target(actor, task)
     }
-    else if (previous_target && !clearable_construction_blocker(previous_target)) {
+    else if (previous_target && !task_target(task, previous_target)) {
       clear_target(actor, task)
     }
 
@@ -196,6 +210,11 @@ export function new_area_clearing_controller(
       target = nearest_blocker(actor, task)
       if (!target) {
         finish(actor, task)
+        return
+      }
+      // A box that is empty after the last allowed pickup finishes above; one that still holds items stops here.
+      if (task.max_clears !== undefined && task.cleared_count >= task.max_clears) {
+        fail(actor, task, 'ground_item_pickup_limit')
         return
       }
       task.target = target
@@ -219,6 +238,11 @@ export function new_area_clearing_controller(
     }
     if (!select_exact_mining_target(actor, target)) {
       reposition_after_rejected_start(actor, task, target)
+      return
+    }
+    // A ground-item pickup never starts mining a stack the inventory cannot take: it stops and says so.
+    if (task.item_entities_only && !ground_stack_fits(actor, target)) {
+      fail(actor, task, 'inventory_full')
       return
     }
 

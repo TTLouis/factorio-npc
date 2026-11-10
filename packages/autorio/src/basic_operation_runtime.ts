@@ -5,6 +5,7 @@ import type { LuaEntity, LuaInventory, SurfaceCreateEntity } from 'factorio:runt
 import type { ControlledActor } from './actors/types'
 import type { new_basic_operation_controller, TransferInventorySnapshot, TransferRefusalCause } from './basic_operations'
 import { layout_node_precheck, record_layout_node_placed } from './construction_layout'
+import { line_node_precheck, record_line_node_placed } from './line_placement'
 import { entity_last_user } from './entity_provenance'
 import { remember_entity_reference, resolve_exact_entity, resolve_visible_entity_reference } from './entity_reference'
 import { factory_world_identity } from './factory_cell_observation'
@@ -719,6 +720,23 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
       controller.fail(actor, task, 'layout_connection_unproven', { layout_node: task.layout_node, layout_refusal })
       return [false, layout_refusal]
     }
+    // A tile of an external line placement: the external footprint rule still holds just before the native create (an item
+    // on the ground or a character that can_place_entity accepts refuses the tile instead of being built over). Refused here,
+    // before create_entity, so the refusal keeps the no-mutation receipt and the line stops at its first refused tile.
+    const line_refusal = line_node_precheck(actor, task.line_node, task.entity_name, position, task.direction, footprint.world_box)
+    if (line_refusal !== undefined) {
+      controller.fail(actor, task, line_refusal.code, {
+        line_node: task.line_node,
+        placement_footprint: {
+          tile_width: footprint.tile_width,
+          tile_height: footprint.tile_height,
+          tile_box: footprint.tile_box,
+          world_box: footprint.world_box,
+        },
+        placement_blockers: line_refusal.blockers,
+      })
+      return [false, `Line placement tile ${task.line_node?.index} of ${task.entity_name} at (${position.x}, ${position.y}) refused: ${line_refusal.code}`]
+    }
     const create_entity_args: SurfaceCreateEntity = {
       name: task.entity_name,
       position,
@@ -741,6 +759,7 @@ export function new_basic_operation_runtime(manager: Manager, controller: BasicC
     remember_entity_reference(entity)
     // The same tick, before the task completes: bind the entity to its layout node and verify the layout's connections.
     record_layout_node_placed(actor, task.layout_node, entity)
+    record_line_node_placed(task.line_node, entity)
 
     const removed = inventory.remove({ name: requirement.item_name, count: requirement.count })
     if (removed !== requirement.count) {

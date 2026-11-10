@@ -114,6 +114,10 @@ test('rejects invalid and unknown calls before entering the runtime', async t =>
     { name: 'factorio_observe', arguments: { name: 'x', args: 'not-object' } },
   ]
   for (const [index, params] of badCalls.entries()) assert.equal((await f.request(index, 'tools/call', params)).error.code, -32602)
+  // Trial 5: an empty operation_id after a refused submission; the refusal says where the id comes from.
+  const empty = await f.request(102, 'tools/call', { name: 'factorio_receipt', arguments: { operation_id: '' } })
+  assert.equal(empty.error.code, -32602)
+  assert.match(empty.error.message, /returned by an admitted factorio_submit\. A refused submission has none/)
   assert.equal((await f.request(100, 'resources/list')).error.code, -32601)
   assert.equal((await f.request(101, 'tools/list', { cursor: 'invented' })).error.code, -32602)
   assert.equal(f.calls.length, 0)

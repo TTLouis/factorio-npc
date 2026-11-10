@@ -6,7 +6,7 @@ import { compactLoadedSkill, parseSkillOffers, renderSkillCard } from './skill-o
 const pack = JSON.parse(readFileSync(new URL('../../../packages/autorio/src/fixtures/leveled-library-v1.json', import.meta.url), 'utf8'))
 
 test('all authored leveled methods survive the real model-context compactor without losing decisions or applicability', () => {
-  assert.equal(pack.skills.length, 54)
+  assert.equal(pack.skills.length, 58)
   assert.equal(pack.default_enabled, false)
   const sizes = []
   for (const original of pack.skills) {
@@ -26,8 +26,8 @@ test('all authored leveled methods survive the real model-context compactor with
 })
 
 test('knowledge stays out of procedural cards and compaction, including invalid type results', () => {
-  assert.equal(pack.schema, 2)
-  assert.equal(pack.knowledge.length, 7)
+  assert.equal(pack.schema, 3)
+  assert.equal(pack.knowledge.length, 9)
   for (const raw of pack.knowledge) {
     assert.equal(compactLoadedSkill(raw, raw.id), undefined)
     assert.deepEqual(parseSkillOffers(JSON.stringify({ ok: true, cards: [raw] })).cards, [])
