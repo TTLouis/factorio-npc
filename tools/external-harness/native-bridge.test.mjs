@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { capabilities, NativeBridge, OPERATION_NAMES, parseExternalOperation, renderExternalOperation } from './native-bridge.mjs'
+import { luaString } from '../../deploy/pterodactyl/staging/structured-policy.mjs'
 
 // The Factorio engine is deliberately mocked here. These tests execute the
 // actual native adapter, policy parser, v2 wrapper and reconciliation code.
@@ -555,6 +556,18 @@ test('effect probe guards each item count natively', async () => {
   const f = fixture()
   await f.bridge.effectProbe({ name: 'mine_resource_at', args: { resource_name: 'crude-oil', x: 0, y: 0 } })
   assert.match(f.calls.at(-1), /pcall\(e\.get_item_count,n\)/)
+})
+
+// getActorSupplies reads supply_entity's observed actor drop, so the probe must count every item it moves.
+test('effect probe counts every item a supply_entity moves', async () => {
+  const f = fixture()
+  await f.bridge.effectProbe({ name: 'supply_entity', args: { unit_number: 9, items: [{ item_name: 'iron-plate', count: 8 }, { item_name: 'coal', count: 2 }] } })
+  assert.match(f.calls.at(-1), /for _,n in pairs\(\{'iron-plate','coal'\}\)/)
+  // Modded names the operation parser accepts are counted too, escaped for Lua (Sol round 1, SOL-002).
+  await f.bridge.effectProbe({ name: 'supply_entity', args: { unit_number: 9, items: [{ item_name: 'my-mod.plate', count: 1 }, { item_name: 'CopperPlate', count: 1 }, { item_name: "it's", count: 1 }, { item_name: 'coal', count: 1 }] } })
+  assert.ok(f.calls.at(-1).includes(`pairs({'my-mod.plate','CopperPlate',${luaString("it's")},'coal'})`), f.calls.at(-1))
+  await f.bridge.effectProbe({ name: 'move_items_exact', args: { item_name: 'my-mod.plate', unit_number: 9, max_count: 1, to_entity: true } })
+  assert.ok(f.calls.at(-1).includes("pairs({'my-mod.plate'})"), f.calls.at(-1))
 })
 
 test('placement candidates are annotated with the same footprint rule external placement enforces', async () => {

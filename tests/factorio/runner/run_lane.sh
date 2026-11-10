@@ -172,6 +172,11 @@ case "$LANE" in
     printf '[npc-test][external-ground-pickup] Running pickup, unblock, empty-box and full-inventory gates...\n'
     run_node external_pickup_factorio.mjs
     ;;
+  external-actor-supplies)
+    # External-harness getActorSupplies through the shipped runtime journal and NativeBridge: fuel, stock, take, refusal, restart.
+    printf '[npc-test][external-actor-supplies] Running fuel, stock, take, refused, no-game-call and restart gates...\n'
+    run_node external_actor_supplies_factorio.mjs
+    ;;
   measurement-window)
     # Supervisor-only accelerated hands-off window: end-tick restore, operator fence, early end and id reuse.
     printf '[npc-test][measurement-window] Running window, fence, early-end and reuse gates...\n'
