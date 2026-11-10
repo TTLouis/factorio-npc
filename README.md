@@ -1,14 +1,18 @@
-# Factorio NPC
+<h1 align="center">Factorio NPC</h1>
 
-![Modes: external, plan, pursuit](https://img.shields.io/badge/modes-external%20%7C%20plan%20%7C%20pursuit-2563eb?style=flat-square)
-![Status: experimental](https://img.shields.io/badge/status-experimental-d97706?style=flat-square)
-[![License: MIT](https://img.shields.io/badge/license-MIT-64748b?style=flat-square)](LICENSE)
+<p align="center">
+  <img alt="Modes: external, plan, pursuit" src="https://img.shields.io/badge/modes-external%20%7C%20plan%20%7C%20pursuit-2563eb?style=flat-square">
+  <img alt="Status: experimental" src="https://img.shields.io/badge/status-experimental-d97706?style=flat-square">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-64748b?style=flat-square"></a>
+</p>
 
-**SGLuna is an AI teammate that lives inside a Factorio world.** It controls a
-standalone character with real inventory, crafting and mining, and can operate
-on a headless server with nobody connected.
+<p align="center">
+  <strong>SGLuna is an AI teammate that lives inside a Factorio world.</strong> It controls a standalone character with real inventory, crafting and mining, and can operate on a headless server with nobody connected.
+</p>
 
-**[Install](#install-and-connect-your-ai-assistant) · [Latest proof](#latest-proof) · [Choose your harness](#choose-your-harness)**
+<p align="center">
+  <strong><a href="#install-and-connect-your-ai-assistant">Install</a> · <a href="#latest-proof">Latest proof</a> · <a href="#choose-your-harness">Choose your harness</a></strong>
+</p>
 
 ---
 
