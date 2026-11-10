@@ -3,8 +3,8 @@
 # Immutable source: deploy/pterodactyl/payload-src/installer.sh
 set -Eeuo pipefail
 umask 077
-REF="1dc7e7230389f487ca7785cffaa3bb889c64a377"
-EXPECTED_SOURCE_SHA256="c0b700a5c88cdfbe9fec2f0f07761efe656bc328af4105fe28502a38a04327b6"
+REF="316944964c52de240fb804fa3e1866c8d2a6b469"
+EXPECTED_SOURCE_SHA256="546a7001e497db099bac846f085f4f661e6c88f64149ea0a7d7e089dd9a83a95"
 URL="https://raw.githubusercontent.com/TTLouis/factorio-npc/$REF/deploy/pterodactyl/payload-src/installer.sh"
 TMP="$(mktemp)"
 log() { printf '[SGLuna bootstrap] %s\n' "$*"; }
