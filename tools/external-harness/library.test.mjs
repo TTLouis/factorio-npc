@@ -209,12 +209,14 @@ test('library capability metadata stays small and advertises the local typed adv
 
 // The harness core is content-agnostic: prompt and tool text name no library id or category,
 // and goal acceptance (the owner's fuel bar) is not a harness prompt.
-test('MCP instructions and tool text name no library entry, record or category', () => {
+test('MCP instructions name no library entry, record, category or prototype', () => {
   const instructions = readFileSync(new URL('../../deploy/pterodactyl/runtime-v8/operator-mcp-server.mjs', import.meta.url), 'utf8').match(/instructions: '([^']*)'/)[1]
   const text = [instructions, ...MCP_TOOLS.map(tool => JSON.stringify(tool))].join('\n')
   const names = [...everyEntry.map(entry => entry.id), ...pack.knowledge_categories.flatMap(category => [category.id, ...category.records.map(record => record.id)])]
   for (const name of names) assert.doesNotMatch(text, new RegExp(`(?<![\\w-])${name}(?![\\w-])`), name)
   assert.doesNotMatch(instructions, /fuel|priming|bootstrap|owner/i)
+  // Prototype names belong to the game or a mod, not the prompt.
+  assert.doesNotMatch(instructions, /miner|drill|furnace|boiler|engine|belt|inserter|assembl|chest|pole/i)
 })
 
 // A different library, with other categories and record fields, loads through the same code.

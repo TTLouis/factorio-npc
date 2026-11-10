@@ -28,9 +28,10 @@ library before each new part of a goal and name no category or entry. The
 library declares its own knowledge categories, listed in `factorio_capabilities`.
 Goal acceptance belongs in the goal text given to the operator, including this
 owner's full-automation bar: no agent fuel runs to individual machines; manual
-priming is a declared finite bootstrap only. Electric miners
-reuse `getPlacementCandidates` and `place_candidate` with native fluid-port
-preservation, not the nonfluid coordinate shortcut. See the
+priming is a declared finite bootstrap only. Prototypes with fluid ports use
+`getPlacementCandidates` and `place_candidate` with native fluid-port
+preservation, not the nonfluid coordinate path; capabilities and refusals
+state this, not a prototype name in a prompt. See the
 [read-only library guide](docs/EXTERNAL_HARNESS.md#read-only-method-library).
 This guidance does not authorize gameplay, tool expansion or another trial.
 
